@@ -1,0 +1,2572 @@
+# Continuous Inference Repair Progress
+
+## Goal
+- Fix `trigger_based` continuous inference collapse in `c:\Users\qqq02\Desktop\99_docs_analysis`.
+- Priority order: instrumentation and diagnostics, offline-vs-online parity and mirror/view skew, segmentation policy, thresholds last.
+
+## Initial Plan
+- Root cause 1: upstream feature / domain skew on continuous-video landmarks before trigger emit.
+- Root cause 2: trigger segmentation trims hold poses and force-closes long signs, amplifying upstream errors.
+- Root cause 3: mirror / handedness / view mismatch changes collapse direction and worsens attractor behavior.
+
+- Change 1: add segment-level instrumentation and alignment/confusion artifacts.
+  Validation: `trigger_segments.csv`, `trigger_segment_alignment.csv`, `trigger_segment_confusion.json`.
+- Change 2: preserve hold poses and carry pre-context across `max_buffer`.
+  Validation: compare WER, `trigger_end_reason_counts`, and long-sign confusion before/after.
+- Change 3: add parity diagnostic script for mirror / branch-ablation sweeps on aligned segments.
+  Validation: compare per-variant accuracy and attractor counts in a dedicated parity report.
+
+## Round 1
+- Modified files:
+  - `integration_workspace/src/app/sign_sentence_engine.py`
+  - `integration_workspace/run_sentence_interface.py`
+  - `integration_workspace/scripts/run_scripted_video_realtime_regression.py`
+- Logic changed:
+  - Added trigger segment instrumentation fields for raw span, sampled indices, motion curve, logits, sampled-path comparison, feature-path drift, and reference confusion.
+  - Changed trigger segmentation so idle closing only trims `no-hand` tails, not hand-present hold poses.
+  - Added carry-over pre-context on `max_buffer` rollover.
+- Commands:
+  - `python -m py_compile integration_workspace/src/app/sign_sentence_engine.py integration_workspace/run_sentence_interface.py integration_workspace/scripts/run_scripted_video_realtime_regression.py`
+  - `python integration_workspace/scripts/run_scripted_video_realtime_regression.py --mode continuous --engine-mode trigger_based --video c:\Users\qqq02\Desktop\99_docs_analysis\i_you_mother_father_techer_sudent_want_like (1).mp4 --checkpoint c:\Users\qqq02\Desktop\99_docs_analysis\integration_workspace\artifacts_webcam9_relative_coord_v1\models\multibranch_baseline.pt --gesture-profile c:\Users\qqq02\Desktop\99_docs_analysis\metadata\webcam9_gesture_profiles.json --output-root c:\Users\qqq02\Desktop\99_docs_analysis\reports\realtime_tests_smoke --sequence-length 30 --confidence-threshold 0.35 --mirror-input`
+- Artifacts:
+  - `reports/realtime_tests_smoke/realtime_test_20260331_023211/trigger_segments.csv`
+  - `reports/realtime_tests_smoke/realtime_test_20260331_023211/trigger_segment_alignment.csv`
+  - `reports/realtime_tests_smoke/realtime_test_20260331_023211/trigger_segment_confusion.json`
+  - `reports/realtime_tests_smoke/realtime_test_20260331_023211/session_summary.json`
+- Result:
+  - WER improved from `1.0000` to `0.7500`.
+  - Collapse still dominated by `like` and `student`.
+  - `sampled_path_*` and current path remain near-identical on wrong segments.
+- Conclusion:
+  - Sampling-path mismatch is falsified as a primary cause and is no longer a priority.
+  - Segmentation was a real amplifier but not the main cause.
+
+## Round 2
+- Modified files:
+  - `integration_workspace/scripts/diagnose_continuous_parity.py`
+  - `reports/continuous_inference_repair_progress.md`
+- Logic changed:
+  - Added a reusable parity diagnostic that reclassifies aligned trigger spans under mirror and branch-ablation variants.
+  - The script clamps out-of-bounds spans, records skipped rows, and emits per-segment plus per-variant summaries.
+- Pending validation:
+  - `segment_variant_predictions.csv`
+  - `parity_summary.json`
+- Commands:
+  - `python -m py_compile integration_workspace/scripts/diagnose_continuous_parity.py`
+  - `python integration_workspace/scripts/diagnose_continuous_parity.py --session-dir c:\Users\qqq02\Desktop\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211`
+- Artifacts:
+  - `reports/realtime_tests_smoke/realtime_test_20260331_023211/parity_diagnostics/segment_variant_predictions.csv`
+  - `reports/realtime_tests_smoke/realtime_test_20260331_023211/parity_diagnostics/parity_summary.json`
+- Result:
+  - Valid aligned segments used: `8`
+  - Out-of-bounds segments skipped: `3` (`segment_id` 11/12/13)
+  - `mirror=0, full`: accuracy `0/8`, attractors `{no_sign: 4, student: 4}`
+  - `mirror=1, full`: accuracy `0/8`, attractors `{like: 3, no_sign: 2, student: 3}`
+  - `zero_location`: still `0/8`
+  - `zero_motion`: still `0/8`, mostly collapses to `no_sign`
+- Conclusion:
+  - Single-branch drift is falsified as a primary fix path.
+  - Zeroing location or motion does not recover the correct classes, so the problem is upstream of branch fusion.
+
+## Round 3
+- Modified files:
+  - `integration_workspace/scripts/diagnose_continuous_parity.py`
+  - `reports/continuous_inference_repair_progress.md`
+- Logic changed:
+  - Added `swap_hands` parity sweep to test whether serving-time handedness semantics are simply inverted relative to training.
+- Commands:
+  - `python -m py_compile integration_workspace/scripts/diagnose_continuous_parity.py`
+  - `python integration_workspace/scripts/diagnose_continuous_parity.py --session-dir c:\Users\qqq02\Desktop\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211 2>$null`
+- Artifacts updated:
+  - `reports/realtime_tests_smoke/realtime_test_20260331_023211/parity_diagnostics/segment_variant_predictions.csv`
+  - `reports/realtime_tests_smoke/realtime_test_20260331_023211/parity_diagnostics/parity_summary.json`
+- Result:
+  - `mirror=0, swap_hands=1, full`: accuracy `0/8`, attractors `{like: 3, no_sign: 3, student: 2}`
+  - `mirror=1, swap_hands=1, full`: accuracy `0/8`, attractors `{no_sign: 5, student: 3}`
+  - No `swap_hands` variant improved accuracy above `0/8`.
+- Conclusion:
+  - A simple left/right hand semantic inversion is falsified.
+  - The remaining high-confidence diagnosis is broader continuous-video domain skew in the upstream landmark / normalized feature semantics, with segmentation only amplifying it.
+
+## Round 4
+- Modified files:
+  - `integration_workspace/scripts/diagnose_video_decode_consistency.py`
+  - `reports/continuous_inference_repair_progress.md`
+- Logic changed:
+  - Added a reproducible decoder-backend diagnostic for the source `mp4`.
+  - The script reports `CAP_PROP_FRAME_COUNT`, sequential readable frame count, and random-access probes per backend.
+- Commands:
+  - `python -m py_compile integration_workspace/scripts/diagnose_video_decode_consistency.py`
+  - `python integration_workspace/scripts/diagnose_video_decode_consistency.py --video "c:\Users\qqq02\Desktop\99_docs_analysis\i_you_mother_father_techer_sudent_want_like (1).mp4" --output-json "c:\Users\qqq02\Desktop\99_docs_analysis\reports\continuous_inference_decode_consistency.json"`
+  - `python integration_workspace/scripts/diagnose_video_decode_consistency.py --video "c:\Users\qqq02\Desktop\99_docs_analysis\i_you_mother_father_techer_sudent_want_like (1).mp4" --init-holistic --output-json "c:\Users\qqq02\Desktop\99_docs_analysis\reports\continuous_inference_decode_consistency_holistic.json"`
+- Artifacts:
+  - `reports/continuous_inference_decode_consistency.json`
+  - `reports/continuous_inference_decode_consistency_holistic.json`
+- Result:
+  - `default` backend: `prop=1344`, `read=1344`
+  - `CAP_FFMPEG`: `prop=1344`, `read=1344`
+  - `CAP_MSMF`: unusable (`prop=-1`, `read=0`)
+  - `HolisticExtractor` initialization did not change `default` or `CAP_FFMPEG` sequential read counts.
+- Conclusion:
+  - The source video itself is valid at `1344` frames.
+  - The earlier `1024` parity artifact is not a source-video defect; it is a script/path-level truth bug and is therefore downgraded from “video corruption” to “diagnostic pipeline inconsistency”.
+
+## Round 5
+- Modified files:
+  - `integration_workspace/scripts/diagnose_continuous_parity.py`
+  - `reports/continuous_inference_repair_progress.md`
+- Logic changed:
+  - Forced parity script video loading onto `CAP_FFMPEG`.
+  - Added `property_frame_count` to the parity artifact payload.
+- Commands:
+  - `python -m py_compile integration_workspace/scripts/diagnose_continuous_parity.py`
+  - `python integration_workspace/scripts/diagnose_continuous_parity.py --session-dir c:\Users\qqq02\Desktop\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211 2>$null`
+- Result:
+  - Long rerun timed out before new artifact was written.
+  - The stale `1024` parity artifact is therefore still not accepted as final truth.
+- Conclusion:
+  - Exact-span parity is still incomplete.
+  - Current mainline is now explicitly: fix parity truth first, then extend exact-span coverage to all 8 tokens using an activity-derived token-span artifact.
+
+## Historical Comparison
+- Historical multi-session scan over `reports/**/session_summary.json` for the same source video showed:
+  - best `segment_decoder` session WER `0.625` with emitted labels `you / like / father / student`
+  - historical `trigger_based` sessions with six emitted classes (`like`, `you`, `father`, `i`, `student`, `want`) at WER `0.75`
+- Interpretation:
+  - “the model can only output like/student in serving” is falsified by historical session artifacts.
+  - This is a serving/regression-path issue, not a hard capability ceiling of the checkpoint.
+
+## Round 6
+- Modified files:
+  - `integration_workspace/scripts/derive_activity_token_spans.py`
+  - `integration_workspace/scripts/classify_token_span_hypothesis.py`
+  - `reports/continuous_inference_repair_progress.md`
+- Logic changed:
+  - Added an independent activity-based token-span derivation path that does not depend on trigger segment labels.
+  - The span derivation uses `frame_predictions.csv` hand/motion chunks plus median token lengths from `metadata/sentence_word_segments_manifest_50.csv`.
+  - Added a follow-up classifier script that scores the derived spans with a full-video continuous feature cache.
+- Commands:
+  - `python -m py_compile integration_workspace/scripts/derive_activity_token_spans.py`
+  - `python integration_workspace/scripts/derive_activity_token_spans.py --video "c:\Users\qqq02\Desktop\99_docs_analysis\i_you_mother_father_techer_sudent_want_like (1).mp4" --frame-csv "c:\Users\qqq02\Desktop\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\frame_predictions.csv" --output-json "c:\Users\qqq02\Desktop\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\activity_token_span_hypothesis.json"`
+  - `python -m py_compile integration_workspace/scripts/classify_token_span_hypothesis.py`
+  - `python integration_workspace/scripts/classify_token_span_hypothesis.py --video "c:\Users\qqq02\Desktop\99_docs_analysis\i_you_mother_father_techer_sudent_want_like (1).mp4" --spans-json "c:\Users\qqq02\Desktop\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\activity_token_span_hypothesis.json" --output-json "c:\Users\qqq02\Desktop\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\activity_token_span_classification.json" 2>$null`
+- Artifacts:
+  - `reports/realtime_tests_smoke/realtime_test_20260331_023211/activity_token_span_hypothesis.json`
+- Result:
+  - The derived 8-token hypothesis currently assigns:
+    - `i: 1-15`
+    - `you: 68-158`
+    - `mother: 205-287`
+    - `father: 355-586`
+    - `teacher: 669-748`
+    - `student: 829-928`
+    - `want: 1065-1170`
+    - `like: 1205-1304`
+  - The follow-up full-cache classification script timed out before producing the JSON artifact.
+- Conclusion:
+  - Exact-span parity coverage is now much closer to complete, but still not complete enough to satisfy the stop condition.
+  - The next single mainline is to make the span-classification pass finish within time budget, likely by caching landmarks/features once and reusing them across diagnostics.
+
+## Failed Hypotheses
+- 已證偽：`sampled path` 與 current path 的差異是 primary cause。
+- 已證偽：單獨 `location` branch 漂移是 primary cause。
+- 已證偽：單獨 `motion` branch 漂移是 primary cause。
+- 已證偽：單純 left/right `swap_hands` 就能修復。
+- 降級優先度：source video 檔案本身損壞或固定只含 `1024` 幀。
+
+## Round 7
+- Time:
+  - `2026-03-31 10:01:32 +08:00`
+- Hypothesis:
+  - 先用一次性的 full-video cache 補齊 `activity-derived exact-span parity`，確認 collapse 是否在 segment proposal 前就已存在。
+  - 若 exact-span 也崩壞，再用 cached feature 做單刀的 `face-relative columns + chin/mouth validity` 定向檢查，判斷 face-reference / mask semantics 是否為 primary skew。
+- Modified files:
+  - `integration_workspace/src/dataset/continuous_feature_cache.py`
+  - `integration_workspace/scripts/build_continuous_feature_cache.py`
+  - `integration_workspace/scripts/classify_token_span_hypothesis.py`
+  - `integration_workspace/scripts/compare_activity_trigger_parity.py`
+  - `integration_workspace/scripts/diagnose_face_reference_skew.py`
+  - `reports/continuous_inference_repair_progress.md`
+- Logic changed:
+  - Added a reusable on-disk cache path for `raw landmarks + masks + normalized landmarks + feature tensors`.
+  - The cache is built with one sequential `CAP_FFMPEG` pass and written as `.npz + .json`, so later diagnostics no longer re-run full-video Holistic.
+  - Refactored `classify_token_span_hypothesis.py` to score spans directly from cached `feature_vectors` instead of rebuilding landmarks/features every run.
+  - Added a comparison report between `activity-derived exact-span parity` and `trigger_segment_alignment.csv`.
+  - Added a targeted face-reference diagnostic that zeroes only `left/right -> chin/mouth` location columns plus `chin_valid / mouth_valid` bits on cached exact spans.
+- Commands:
+  - `python -m py_compile integration_workspace/src/dataset/continuous_feature_cache.py`
+  - `python -m py_compile integration_workspace/scripts/build_continuous_feature_cache.py`
+  - `python -m py_compile integration_workspace/scripts/classify_token_span_hypothesis.py`
+  - `python -m py_compile integration_workspace/scripts/compare_activity_trigger_parity.py`
+  - `python integration_workspace/scripts/build_continuous_feature_cache.py --video "E:\99_docs_analysis\i_you_mother_father_techer_sudent_want_like (1).mp4" --output-dir "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\continuous_feature_cache" --mirror-modes 1`
+  - `python integration_workspace/scripts/classify_token_span_hypothesis.py --spans-json "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\activity_token_span_hypothesis.json" --cache-dir "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\continuous_feature_cache" --output-json "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\activity_token_span_classification.json" --mirror-modes 1`
+  - `python integration_workspace/scripts/compare_activity_trigger_parity.py --activity-json "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\activity_token_span_classification.json" --trigger-csv "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\trigger_segment_alignment.csv" --output-json "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\activity_vs_trigger_parity.json"`
+  - `python -m py_compile integration_workspace/scripts/diagnose_face_reference_skew.py`
+  - `python integration_workspace/scripts/diagnose_face_reference_skew.py --spans-json "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\activity_token_span_hypothesis.json" --cache-dir "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\continuous_feature_cache" --output-json "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\face_reference_skew_diagnostic.json" --mirror-input 1`
+- Artifacts:
+  - `reports/realtime_tests_smoke/realtime_test_20260331_023211/continuous_feature_cache/continuous_feature_cache_mirror1.npz`
+  - `reports/realtime_tests_smoke/realtime_test_20260331_023211/continuous_feature_cache/continuous_feature_cache_mirror1.json`
+  - `reports/realtime_tests_smoke/realtime_test_20260331_023211/continuous_feature_cache/continuous_feature_cache_manifest.json`
+  - `reports/realtime_tests_smoke/realtime_test_20260331_023211/activity_token_span_classification.json`
+  - `reports/realtime_tests_smoke/realtime_test_20260331_023211/activity_vs_trigger_parity.json`
+  - `reports/realtime_tests_smoke/realtime_test_20260331_023211/face_reference_skew_diagnostic.json`
+- Result:
+  - Cache build completed successfully with `frame_count=1344`, matching `session_summary.json` and closing the exact-span frame-count truth gap for this activity-derived path.
+  - `activity_token_span_classification.json` now covers all 8 reference tokens with no out-of-bounds skips.
+  - Exact-span predictions at `mirror_input=1` are:
+    - `i -> like`
+    - `you -> like`
+    - `mother -> like`
+    - `father -> no_sign`
+    - `teacher -> no_sign`
+    - `student -> student`
+    - `want -> student`
+    - `like -> like`
+  - Exact-span accuracy is `2/8 = 0.25`, with predicted label counts `{like: 4, no_sign: 2, student: 2}`.
+  - `activity_vs_trigger_parity.json` shows the main collapse pattern is already present before trigger emission:
+    - `you -> like` exact-span and trigger segment both agree on `like`
+    - `mother -> like` exact-span and trigger segment both agree on `like`
+    - `father` exact-span is `no_sign`, while trigger splits it into `father->like` and `father->no_sign`
+    - `want -> student` exact-span and trigger segment both agree on `student`
+    - `teacher` exact-span is already `no_sign`; trigger changes the failure mode to `student`
+  - `face_reference_skew_diagnostic.json` shows `changed_after_face_ref_ablation_count = 0/8`.
+  - `chin_valid_ratio` and `mouth_valid_ratio` are `1.0` across all 8 exact spans, and `torso_scale_mean` stays in a narrow band around `0.63-0.68`.
+- Improvement:
+  - No serving WER improvement yet in this round because this was a cache/parity instrumentation round, not a decoder-behavior change.
+  - Truth/parity completeness improved materially: activity-derived exact-span parity now covers all 8 reference tokens on a verified `1344`-frame cache path.
+- Conclusion:
+  - This is the second independent validation that collapse is upstream of trigger proposal:
+    - trigger-aligned parity was already `0/8` on the stale diagnostic path
+    - activity-derived exact-span parity is now `2/8` with the same dominant attractors even after removing trigger segmentation from the loop
+  - `face-relative location columns / chin-mouth validity bits` are downgraded as the primary root cause because zeroing them changes `0/8` top-1 predictions.
+  - The more likely remaining primary skew layer is now `handshape / explicit finger-state / landmark graph semantics`, not face-reference availability.
+- Falsified or downgraded hypotheses:
+  - 已證偽：`face-relative location vectors + chin/mouth validity bits` 是 primary skew。
+  - 降級優先度：`face reference missing` 或 `torso scale normalization instability` 是主要來源。
+- Next single mainline:
+  - Use the same cached exact-span path to test `explicit finger-state columns` and hand-mask statistics against the collapsed classes.
+  - The next cut should stay narrow: compare `full` vs `zero_explicit_finger_state` (or `graph-only`) on the cached 8 spans, then decide whether the skew is concentrated in `finger-state / hand landmark graph` rather than reopening mirror or threshold branches.
+
+## Round 8
+- Time:
+  - `2026-03-31 late morning +08:00`
+- Hypothesis:
+  - After ruling out face references, the next likely concrete layer is either `explicit finger-state columns`, `pose-local landmark graph`, or `hand-local landmark graph`.
+  - A narrow cached ablation sweep over these groups should tell us which attractor is actually anchored by which feature family.
+- Modified files:
+  - `integration_workspace/scripts/diagnose_explicit_finger_state_skew.py`
+  - `integration_workspace/scripts/diagnose_pose_graph_skew.py`
+  - `integration_workspace/scripts/diagnose_hand_graph_skew.py`
+  - `reports/continuous_inference_repair_progress.md`
+- Commands:
+  - `python -m py_compile integration_workspace/scripts/diagnose_explicit_finger_state_skew.py`
+  - `python integration_workspace/scripts/diagnose_explicit_finger_state_skew.py --spans-json "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\activity_token_span_hypothesis.json" --cache-dir "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\continuous_feature_cache" --output-json "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\explicit_finger_state_skew_diagnostic.json" --mirror-input 1`
+  - `python -m py_compile integration_workspace/scripts/diagnose_pose_graph_skew.py`
+  - `python integration_workspace/scripts/diagnose_pose_graph_skew.py --spans-json "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\activity_token_span_hypothesis.json" --cache-dir "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\continuous_feature_cache" --output-json "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\pose_graph_skew_diagnostic.json" --mirror-input 1`
+  - `python -m py_compile integration_workspace/scripts/diagnose_hand_graph_skew.py`
+  - `python integration_workspace/scripts/diagnose_hand_graph_skew.py --spans-json "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\activity_token_span_hypothesis.json" --cache-dir "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\continuous_feature_cache" --output-json "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\hand_graph_skew_diagnostic.json" --mirror-input 1`
+- Artifacts:
+  - `reports/realtime_tests_smoke/realtime_test_20260331_023211/explicit_finger_state_skew_diagnostic.json`
+  - `reports/realtime_tests_smoke/realtime_test_20260331_023211/pose_graph_skew_diagnostic.json`
+  - `reports/realtime_tests_smoke/realtime_test_20260331_023211/hand_graph_skew_diagnostic.json`
+- Result:
+  - `explicit_finger_state_skew_diagnostic.json`
+    - `changed_after_explicit_finger_ablation_count = 0/8`
+    - zeroing feature columns `204:214` changes no top-1 prediction
+    - confidence shifts are visible (`i/you/mother` become even more biased toward `like`), but the attractor classes do not change
+  - `pose_graph_skew_diagnostic.json`
+    - `changed_after_pose_graph_ablation_count = 2/8`
+    - `you: like -> no_sign`
+    - `mother: like -> no_sign`
+    - `i` stays `like`, but its `no_sign` posterior rises sharply after pose ablation
+  - `hand_graph_skew_diagnostic.json`
+    - `changed_after_hand_graph_ablation_count = 2/8`
+    - `student: student -> no_sign`
+    - `want: student -> no_sign`
+    - `i/you/mother/like` stay on `like` even when all hand-local xyz + hand-mask columns are zeroed
+- Improvement:
+  - No serving WER change yet; this round only sharpened localization.
+  - Root-cause depth improved materially: the collapse is no longer a generic “upstream domain skew” bucket.
+- Conclusion:
+  - `like` attractor collapse for one-handed early tokens (`i/you/mother`) is not primarily driven by face refs or explicit finger-state bits; it is sustained by broader pose/location context and only partially weakened by pose-graph ablation.
+  - `student` attractor collapse for later tokens (`student/want`) is materially dependent on hand-local landmark graph semantics; removing hand graph flips both to `no_sign`.
+  - The current best concrete diagnosis is therefore split by attractor:
+    - `like` collapse: pose/location contextual skew under mirror serving, not face-reference availability and not explicit finger-state columns
+    - `student` collapse: hand-local landmark graph / hand-mask semantics
+- Falsified or downgraded hypotheses:
+  - 已證偽：`explicit finger-state columns (204:214)` 是 primary skew。
+  - 降級優先度：單靠 `face refs` 或 `explicit finger-state` 就能解釋 `like/student` attractor collapse。
+- Next single mainline:
+  - Stop widening ablations.
+  - Use the cached exact spans to compare `hand-mask / landmark validity patterns` and `location-zone / torso-context features` against the two attractor families separately:
+    - `i/you/mother -> like`
+    - `student/want -> student`
+  - The next implementation cut should stay concrete: add a per-span feature-group statistics report that directly contrasts `like-collapse` vs `student-collapse` spans, then patch the serving feature reconstruction on the dominant subgroup only.
+
+## Round 9
+- Time:
+  - `2026-03-31 afternoon +08:00`
+- Hypothesis:
+  - `like-family` and `student-family` need to be split into per-group prototype distances before choosing any serving fix.
+  - A single subgroup repair experiment is justified only after that report identifies one dominant group clearly enough.
+- Modified files:
+  - `integration_workspace/scripts/build_span_feature_group_statistics.py`
+  - `integration_workspace/src/models/feature_group_transforms.py`
+  - `integration_workspace/src/app/sign_sentence_engine.py`
+  - `integration_workspace/scripts/classify_token_span_hypothesis.py`
+  - `reports/continuous_inference_repair_progress.md`
+- Logic changed:
+  - Added a reusable per-span statistics report over cached exact spans, including:
+    - raw / normalized validity ratios
+    - per-group mean / std / energy
+    - zero ratio
+    - frame activation summaries
+    - distance to reference and attractor prototypes
+  - Prototypes are built from `dataset_pipeline_webcam9_relative_coord_v1/processed_sequences/*.npz` instead of rerunning extraction.
+  - Fixed a prototype-selection bug so `--prototype-groups-per-class` now truly caps the number of source groups used per class.
+  - Added a shared serving-time subgroup transform helper for `hand_mask_validity_scale`.
+  - Wired `hand_mask_validity_scale` into:
+    - `sign_sentence_engine.py` runtime inference path
+    - `classify_token_span_hypothesis.py` exact-span scorer
+- Commands:
+  - `python -m py_compile integration_workspace/scripts/build_span_feature_group_statistics.py`
+  - `python integration_workspace/scripts/build_span_feature_group_statistics.py --spans-json "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\activity_token_span_hypothesis.json" --classification-json "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\activity_token_span_classification.json" --cache-dir "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\continuous_feature_cache" --output-json "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\span_feature_group_statistics.json" --mirror-input 1`
+  - `python -m py_compile integration_workspace/src/models/feature_group_transforms.py`
+  - `python -m py_compile integration_workspace/src/app/sign_sentence_engine.py`
+  - `python -m py_compile integration_workspace/scripts/classify_token_span_hypothesis.py`
+  - `python integration_workspace/scripts/classify_token_span_hypothesis.py --spans-json "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\activity_token_span_hypothesis.json" --cache-dir "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\continuous_feature_cache" --output-json "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\activity_token_span_classification_maskscale0.json" --mirror-modes 1 --hand-mask-validity-scale 0.0`
+  - inline Python command to write `training_frame_validity_reference.json`
+  - inline Python command to write `hand_mask_validity_scale_experiment_summary.json`
+  - `python -m py_compile integration_workspace/scripts/build_span_feature_group_statistics.py`
+  - `python integration_workspace/scripts/build_span_feature_group_statistics.py --spans-json "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\activity_token_span_hypothesis.json" --classification-json "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\activity_token_span_classification.json" --cache-dir "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\continuous_feature_cache" --output-json "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\span_feature_group_statistics.json" --mirror-input 1 --prototype-groups-per-class 6`
+- Artifacts:
+  - `reports/realtime_tests_smoke/realtime_test_20260331_023211/span_feature_group_statistics.json`
+  - `reports/realtime_tests_smoke/realtime_test_20260331_023211/training_frame_validity_reference.json`
+  - `reports/realtime_tests_smoke/realtime_test_20260331_023211/activity_token_span_classification_maskscale0.json`
+  - `reports/realtime_tests_smoke/realtime_test_20260331_023211/hand_mask_validity_scale_experiment_summary.json`
+- Result:
+  - With the prototype-selection bug fixed, `span_feature_group_statistics.json` now uses exactly `6` source groups per class.
+  - `like-family` (`i / you / mother -> like`) group ranking is now:
+    - `pose_location_contextual`: `+0.310730`
+    - `hand_mask_validity`: `+0.265415`
+    - `pose_context_graph`: `+0.219625`
+    - `location_vectors`: `+0.212507`
+  - `student-family` is not a single mode and must be split:
+    - `student_attractor` subset (`student / want`) is dominated by `hand_mask_validity`: `+0.837661`
+    - `no_sign` control subset (`father / teacher`) is dominated by `pose_context_graph`: `+0.201062`
+  - `training_frame_validity_reference.json` shows a concrete serving/training mismatch for one-handed labels:
+    - training `i`: left-hand valid mean `0.204167`
+    - training `you`: left-hand valid mean `0.454167`
+    - training `mother`: left-hand valid mean `0.216667`
+    - training `like`: left-hand valid mean `0.341667`
+    - continuous exact spans:
+      - `i`: `0.800000`
+      - `you`: `0.890110`
+      - `mother`: `0.975904`
+  - Minimal repair experiment:
+    - subgroup: `hand_mask_validity`
+    - action: set `hand_mask_validity_scale = 0.0`
+    - artifact: `hand_mask_validity_scale_experiment_summary.json`
+    - baseline exact-span accuracy: `0.25`
+    - experiment exact-span accuracy: `0.00`
+    - predictions collapsed to `{no_sign: 6, want: 2}`
+- Improvement:
+  - No improvement.
+  - The single repair experiment made exact-span classification strictly worse, so trigger-based smoke rerun was intentionally skipped.
+- Conclusion:
+  - The prototype-distance report sharpened the diagnosis beyond “upstream skew”:
+    - `like-family` primary drift is now better localized to `pose/location contextual reconstruction`, with `hand_mask_validity` as a secondary mismatch.
+    - `student-family` is actually two different failure modes:
+      - `student / want -> student` leans on `hand_mask_validity`
+      - `father / teacher -> no_sign` leans on `pose_context_graph`
+  - The attempted fix falsified one specific repair hypothesis:
+    - globally suppressing `hand_mask_validity` is not a viable fix, even for `like-family`
+    - those features are mismatched, but still carry necessary signal
+- Falsified or downgraded hypotheses:
+  - 已證偽：`hand_mask_validity` 全域抑制（scale=`0.0`）是可行修補。
+  - 降級優先度：把 `student-family` 當成單一 failure mode 一起修。
+  - 降級優先度：`like-family` 的 primary fix 應該先從 hand-mask suppression 開始。
+- Next single mainline:
+  - Focus only on `like-family`.
+  - The next patch should target `pose/location contextual reconstruction` rather than hand-mask suppression:
+    - inspect whether serving-time `location_vectors` / `pose_context_graph` are systematically denser or shifted than training prototypes
+    - then try one minimal calibration on that subgroup only
+
+## Round 10
+- Time:
+  - `2026-03-31 late afternoon +08:00`
+- Hypothesis:
+  - `like-family` can be shrunk from the broad `pose/location contextual` bucket to one dominant serving subgroup.
+  - If the dominant subgroup is concrete enough, one minimal repair should be run directly on that subgroup and then validated first on exact-span parity, then on trigger serving only if there is a positive signal.
+- Modified files:
+  - `integration_workspace/scripts/analyze_like_family_pose_location.py`
+  - `integration_workspace/src/models/feature_group_transforms.py`
+  - `integration_workspace/scripts/classify_token_span_hypothesis.py`
+  - `integration_workspace/src/landmarks/location_features.py`
+  - `integration_workspace/src/landmarks/feature_builder.py`
+  - `integration_workspace/src/app/sign_sentence_engine.py`
+  - `reports/continuous_inference_repair_progress.md`
+- Logic changed:
+  - Added a like-family-only breakdown over cached exact spans that splits the earlier `pose_location_contextual` bucket into:
+    - `pose_torso_frame`
+    - `pose_arm_chain`
+    - `left_face_vectors`
+    - `left_body_vectors`
+    - `left_zone`
+    - `left_pose_location_joint`
+  - Added cached exact-span experiment knobs for:
+    - `pose_hip_coordinate_scale`
+    - `left_location_anchor`
+    - `pose_local_anchor`
+  - Added a safe runtime flag path for `POSE_LOCAL_ANCHOR`, defaulting to `mid_shoulder`, so serving can be A/B tested without changing training defaults.
+- Commands:
+  - `python -m py_compile integration_workspace/scripts/analyze_like_family_pose_location.py`
+  - `python integration_workspace/scripts/analyze_like_family_pose_location.py --spans-json "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\activity_token_span_hypothesis.json" --classification-json "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\activity_token_span_classification.json" --cache-dir "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\continuous_feature_cache" --output-json "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\like_family_pose_location_breakdown.json" --mirror-input 1 --prototype-groups-per-class 6`
+  - `python -m py_compile integration_workspace/src/models/feature_group_transforms.py integration_workspace/scripts/classify_token_span_hypothesis.py integration_workspace/src/app/sign_sentence_engine.py`
+  - `python integration_workspace/scripts/classify_token_span_hypothesis.py --spans-json "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\activity_token_span_hypothesis.json" --cache-dir "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\continuous_feature_cache" --output-json "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\activity_token_span_classification_posehip0p5.json" --mirror-modes 1 --pose-hip-coordinate-scale 0.5`
+  - `python -m py_compile integration_workspace/src/landmarks/location_features.py integration_workspace/scripts/classify_token_span_hypothesis.py`
+  - `python integration_workspace/scripts/classify_token_span_hypothesis.py --spans-json "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\activity_token_span_hypothesis.json" --cache-dir "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\continuous_feature_cache" --output-json "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\activity_token_span_classification_leftindextip.json" --mirror-modes 1 --left-location-anchor index_tip`
+  - `python integration_workspace/scripts/classify_token_span_hypothesis.py --spans-json "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\activity_token_span_hypothesis.json" --cache-dir "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\continuous_feature_cache" --output-json "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\activity_token_span_classification_posetorsoanchor.json" --mirror-modes 1 --pose-local-anchor torso_center`
+  - `python integration_workspace/scripts/classify_token_span_hypothesis.py --spans-json "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\activity_token_span_hypothesis.json" --cache-dir "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\continuous_feature_cache" --output-json "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\activity_token_span_classification_poseanchor_leftindextip.json" --mirror-modes 1 --pose-local-anchor torso_center --left-location-anchor index_tip`
+  - `$env:POSE_LOCAL_ANCHOR='torso_center'; python integration_workspace/scripts/run_scripted_video_realtime_regression.py --mode continuous --engine-mode trigger_based --video "E:\99_docs_analysis\i_you_mother_father_techer_sudent_want_like (1).mp4" --checkpoint "E:\99_docs_analysis\integration_workspace\artifacts_webcam9_relative_coord_v1\models\multibranch_baseline.pt" --gesture-profile "E:\99_docs_analysis\metadata\webcam9_gesture_profiles.json" --sequence-length 30 --confidence-threshold 0.35 --mirror-input --output-root "E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor"`
+  - inline Python commands to write:
+    - `pose_hip_scale_experiment_summary.json`
+    - `left_index_anchor_experiment_summary.json`
+    - `pose_local_anchor_experiment_summary.json`
+    - `poseanchor_leftindextip_experiment_summary.json`
+    - `serving_comparison_vs_baseline.json`
+- Artifacts:
+  - `reports/realtime_tests_smoke/realtime_test_20260331_023211/like_family_pose_location_breakdown.json`
+  - `reports/realtime_tests_smoke/realtime_test_20260331_023211/activity_token_span_classification_posehip0p5.json`
+  - `reports/realtime_tests_smoke/realtime_test_20260331_023211/pose_hip_scale_experiment_summary.json`
+  - `reports/realtime_tests_smoke/realtime_test_20260331_023211/activity_token_span_classification_leftindextip.json`
+  - `reports/realtime_tests_smoke/realtime_test_20260331_023211/left_index_anchor_experiment_summary.json`
+  - `reports/realtime_tests_smoke/realtime_test_20260331_023211/activity_token_span_classification_posetorsoanchor.json`
+  - `reports/realtime_tests_smoke/realtime_test_20260331_023211/pose_local_anchor_experiment_summary.json`
+  - `reports/realtime_tests_smoke/realtime_test_20260331_023211/activity_token_span_classification_poseanchor_leftindextip.json`
+  - `reports/realtime_tests_smoke/realtime_test_20260331_023211/poseanchor_leftindextip_experiment_summary.json`
+  - `reports/realtime_tests_smoke_poseanchor/realtime_test_20260331_104210/session_summary.json`
+  - `reports/realtime_tests_smoke_poseanchor/realtime_test_20260331_104210/trigger_segment_alignment.csv`
+  - `reports/realtime_tests_smoke_poseanchor/realtime_test_20260331_104210/trigger_segments.csv`
+  - `reports/realtime_tests_smoke_poseanchor/realtime_test_20260331_104210/serving_comparison_vs_baseline.json`
+- Result:
+  - Fine-grained like-family breakdown:
+    - `dominant_subgroup = pose_torso_frame`
+    - ranking:
+      - `pose_torso_frame = +0.160257`
+      - `left_pose_location_joint = +0.150665`
+      - `left_face_vectors = +0.147666`
+      - `pose_arm_chain = +0.133243`
+      - `left_zone = +0.058079`
+      - `left_body_vectors = +0.034198`
+    - node-level breakdown shows the most consistent offenders are `left_hip` and `right_hip`; both are closer to `like` than the true class for `i / you / mother`.
+  - Minimal repair experiment 1:
+    - subgroup: `pose_hip_coordinate_scale = 0.5`
+    - result: no top-1 change at all
+    - baseline exact-span accuracy `0.25 -> 0.25`
+    - counts unchanged: `{like: 4, no_sign: 2, student: 2}`
+  - Minimal repair experiment 2:
+    - subgroup: `left_location_anchor = index_tip`
+    - result: no top-1 change
+    - baseline exact-span accuracy `0.25 -> 0.25`
+    - only small logit shifts; the attractor classes stay the same
+  - Minimal repair experiment 3:
+    - subgroup: `pose_local_anchor = torso_center`
+    - exact-span result:
+      - accuracy stays `0.25`
+      - but class coverage changes materially:
+        - baseline counts `{like: 4, no_sign: 2, student: 2}`
+        - experiment counts `{like: 2, i: 1, you: 1, no_sign: 3, student: 1}`
+      - token-level change:
+        - `you: like -> i`
+        - `mother: like -> you`
+        - `want: student -> no_sign`
+      - this is the first repair that weakens the `like` attractor instead of leaving it unchanged
+  - Follow-up exact-span experiment:
+    - `pose_local_anchor = torso_center + left_location_anchor = index_tip`
+    - no additional gain over `pose_local_anchor` alone; predictions stay identical to the pose-anchor-only run
+  - Trigger serving A/B:
+    - runtime `POSE_LOCAL_ANCHOR=torso_center`
+    - session: `reports/realtime_tests_smoke_poseanchor/realtime_test_20260331_104210`
+    - baseline WER `0.75 -> 0.875`
+    - emit counts `8 -> 2`
+    - trigger rejections `3 -> 9`
+    - emitted labels become `{student: 1, i: 1}`
+    - trigger alignment shows the same positive class-shift as exact-span (`you->i`, `mother->you`) but both early tokens are rejected because confidence and margin stay below emit criteria:
+      - `you: raw_label=i confidence=0.492276 margin=0.105101 -> trigger_reject`
+      - `mother: raw_label=you confidence=0.538212 margin=0.357765 -> trigger_reject`
+- Improvement:
+  - Exact-span:
+    - improved class coverage and weakened the `like` attractor for the first time
+    - but no accuracy gain yet
+  - Trigger serving:
+    - worsened (`WER 0.75 -> 0.875`) because the class-shifted early tokens do not cross the existing emit thresholds
+- Conclusion:
+  - The like-family root cause is now more concrete than `pose/location contextual skew`:
+    - dominant mismatch sits in the `pose_local` reconstruction semantics, specifically the `mid_shoulder`-anchored torso-frame used by the pose graph
+    - replacing that with `torso_center`-aligned pose-local features is enough to break the `like` attractor on exact spans
+  - This also explains why single-group suppressions failed:
+    - `hip-only scaling` was too weak to change the fusion decision
+    - `index_tip` anchor by itself was not enough because the attractor entry point was still the pose-local torso frame
+  - Residual error after the pose-anchor fix is no longer `like` collapse; it becomes intra-family confusion:
+    - `you -> i`
+    - `mother -> you`
+    - which points to `left_face_vectors` / face-touch reference semantics as the next narrower lever, not a return to global threshold tuning
+- Falsified or downgraded hypotheses:
+  - 已證偽：單獨 `pose_hip_coordinate_scale = 0.5` 是有效修補。
+  - 已證偽：單獨 `left_location_anchor = index_tip` 是有效修補。
+  - 降級優先度：`left_body_vectors` 或 `left_zone` 是 like-family 的第一主因。
+  - 已部分支持但不能直接上線：`pose_local_anchor = torso_center` 對 exact-span 有正向訊號，但在 trigger serving 目前會造成大量 reject，還不能單獨作為完整修補。
+- Next single mainline:
+  - Keep `pose_local_anchor = torso_center` as the current best exact-span scaffold.
+  - Do not touch threshold tuning yet.
+  - The next narrow cut should target `left_face_vectors` semantics within the already de-collapsed like-family:
+    - distinguish `you -> i` and `mother -> you` using the face-reference subgroup only
+    - likely candidates are `mouth/chin/nose` reference semantics and the choice of contact anchor (`thumb_tip` / class-specific active point), not `index_tip` globally
+
+## Round 11
+- Time:
+  - `2026-03-31 11:13:25 +08:00`
+- Hypothesis:
+  - Under the fixed scaffold `pose_local_anchor = torso_center`, the residual confusion should now be explainable inside `left_face_vectors` alone.
+  - The first narrow cut is to compare `you -> i` and `mother -> you` against true/confused prototypes, then run one direct face-reference repair experiment instead of reopening pose, hand-mask, or threshold branches.
+- Modified files:
+  - `integration_workspace/src/landmarks/location_features.py`
+  - `integration_workspace/scripts/classify_token_span_hypothesis.py`
+  - `integration_workspace/scripts/analyze_like_family_face_touch_semantics.py`
+  - `reports/continuous_inference_repair_progress.md`
+- Logic changed:
+  - Added left-face-only experiment knobs to `build_location_features()` so cached exact-span rescoring can override:
+    - `left_face_reference_modes`
+    - `left_face_anchor_modes`
+  - Extended `classify_token_span_hypothesis.py` with:
+    - `--left-face-reference-modes`
+    - `--left-face-anchor-modes`
+  - Added a dedicated residual-confusion analysis script that reports, for `you -> i` and `mother -> you`:
+    - raw / normalized validity ratios
+    - `left_face_vectors` per-reference and per-dimension statistics
+    - distance to true prototype vs confused prototype
+    - prefix takeover behavior
+    - exhaustive face-only strategy search over `mouth/chin/nose` reference mappings and active anchors
+- Commands:
+  - `python -m py_compile "E:\99_docs_analysis\integration_workspace\src\landmarks\location_features.py"`
+  - `python -m py_compile "E:\99_docs_analysis\integration_workspace\scripts\classify_token_span_hypothesis.py"`
+  - `python -m py_compile "E:\99_docs_analysis\integration_workspace\scripts\analyze_like_family_face_touch_semantics.py"`
+  - `python "E:\99_docs_analysis\integration_workspace\scripts\analyze_like_family_face_touch_semantics.py" --spans-json "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\activity_token_span_hypothesis.json" --classification-json "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\activity_token_span_classification_posetorsoanchor.json" --cache-dir "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\continuous_feature_cache" --output-json "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\like_family_face_touch_semantics_analysis.json" --mirror-input 1 --prototype-groups-per-class 6`
+  - `python "E:\99_docs_analysis\integration_workspace\scripts\classify_token_span_hypothesis.py" --spans-json "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\activity_token_span_hypothesis.json" --cache-dir "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\continuous_feature_cache" --output-json "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\activity_token_span_classification_face_ref_noseonly.json" --mirror-modes 1 --pose-local-anchor torso_center --left-face-reference-modes nose,nose,nose --left-face-anchor-modes center,center,center`
+  - inline Python command to write `face_ref_noseonly_experiment_summary.json`
+- Artifacts:
+  - `reports/realtime_tests_smoke/realtime_test_20260331_023211/like_family_face_touch_semantics_analysis.json`
+  - `reports/realtime_tests_smoke/realtime_test_20260331_023211/activity_token_span_classification_face_ref_noseonly.json`
+  - `reports/realtime_tests_smoke/realtime_test_20260331_023211/face_ref_noseonly_experiment_summary.json`
+- Result:
+  - Residual confusion report:
+    - `you -> i`
+      - raw / normalized validity are both stable: left-hand `0.890110`, pose `1.0`, mouth `1.0`, chin `1.0`
+      - `left_face_vectors` are already closer to the true `you` prototype than to `i`:
+        - overall `true_minus_confused_l2 = -0.797126`
+        - no face-reference prefix takeover occurs (`first_true_to_confused_takeover_offset = -1` for `nose/chin/mouth`)
+      - the most responsive dimensions are `chin_z` and `mouth_z`, but they still favor `you`, not `i`
+      - exhaustive face-only search confirms this is not an anchor-only problem:
+        - `1125` strategies make the face vector even closer to `you`
+        - but none of the exact-span face-only trials flipped `you` off `i`
+    - `mother -> you`
+      - raw / normalized validity are also stable: left-hand `0.975904`, pose `1.0`, mouth `1.0`, chin `1.0`
+      - `left_face_vectors` are concretely closer to the confused `you` prototype:
+        - overall `true_minus_confused_l2 = +0.755472`
+        - every face reference takes over immediately at prefix offset `0`
+      - dominant mismatch is no longer generic “face semantics”; it is:
+        - dominant reference: `nose`
+        - dominant dimension: `nose_z`
+        - strongest subordinate drifts: `chin_y`, `nose_y`, `mouth_y`, `chin_z`, `mouth_z`
+      - prototype search shows many face-only strategies can improve distance-to-prototype for `mother`, but those do not automatically survive model scoring
+  - Minimal repair experiment:
+    - experiment: `left_face_reference_modes = nose,nose,nose`
+    - rationale: `mother -> you` is dominated by `nose / nose_z`, so the first direct patch tested whether nose-only face references would remove the wrong-class pull
+    - exact-span result:
+      - accuracy `0.25 -> 0.125`
+      - class counts `{like: 2, i: 1, you: 1, no_sign: 3, student: 1} -> {like: 1, i: 3, no_sign: 3, student: 1}`
+      - `mother: you -> i`
+      - `like: like -> i`
+      - `you -> i` becomes even more confident
+        - `i` confidence `0.549188 -> 0.860612`
+- Improvement:
+  - No improvement.
+  - The face-reference remap removes `mother -> you`, but only by over-collapsing into `i` and by degrading exact-span accuracy / coverage.
+- Conclusion:
+  - The dominant residual within `left_face_vectors` is now concrete enough to reject one whole class of patches:
+    - `mother -> you` is driven mainly by `nose / nose_z` semantics
+    - `you -> i` is not driven by the face subgroup being closer to `i`; its face vector already favors `you`
+  - This means a single global `mouth/chin/nose` remap or single global active-point swap is unlikely to fix both residual confusions at once.
+  - The remaining plausible face-only lever is narrower:
+    - column-level calibration inside `left_face_vectors`
+    - most likely `nose_z` vs `chin_z/mouth_z` weighting, rather than another all-reference remap
+- Falsified or downgraded hypotheses:
+  - 已證偽：`left_face_vectors` 的單一全域 reference remap（`nose,nose,nose`）是有效修補。
+  - 已降級：`thumb_tip / index_tip / closest_valid_fingertip` 這類單一全域 active-point 切換，足以單獨解掉 `you -> i`。
+  - 已降級：把 `you -> i` 視為與 `mother -> you` 同一個 face-reference 失配模式。
+- Next single mainline:
+  - Keep `pose_local_anchor = torso_center` as the scaffold.
+  - Stay inside `left_face_vectors` only.
+  - The next cut should target `column-level face normalization semantics`, not another global reference remap:
+    - test whether suppressing or rescaling `nose_z` while preserving `chin_z / mouth_z` can reduce `mother -> you`
+    - verify whether `you -> i` remains unchanged under the same patch; if so, treat `you -> i` as a non-face-dominant residual and do not keep forcing a single shared face-only patch for both tokens.
+
+## Round 12
+- Time:
+  - `2026-03-31 11:31:43 +08:00`
+- Hypothesis:
+  - Under the retained scaffold `pose_local_anchor = torso_center`, the `mother -> you` residual is now narrow enough to test as a `left_face_vectors` column-level mismatch.
+  - The primary question this round is whether `nose_z` is the dominant takeover column by itself, or whether it only works jointly with the nearby `chin_y / nose_y / mouth_y / chin_z / mouth_z` drift.
+  - If the evidence holds, the only allowed repair is a residual-specific `nose_z` calibration on the `mother`-like `you` residual, without reopening global face remaps, active-point swaps, or threshold tuning.
+- Modified files:
+  - `integration_workspace/scripts/analyze_mother_you_face_column_calibration.py`
+  - `integration_workspace/scripts/apply_mother_you_face_column_rescore.py`
+  - `reports/continuous_inference_repair_progress.md`
+- Logic changed:
+  - Added a dedicated `mother -> you` column-analysis script that reports:
+    - per-column mean / std / energy
+    - signed deltas to `mother` vs `you`
+    - takeover order
+    - `nose_z` offset scan
+    - the smallest effective `nose_z` correction rather than the first scan hit
+  - Added a residual-specific rescoring script that:
+    - stays inside `left_face_vectors`
+    - only touches spans whose baseline top1 is `you`
+    - applies a single-column `nose_z` calibration
+    - flips the label to `mother` only when the calibrated `mother` prototype distance overtakes `you`
+    - emits exact-span comparison artifacts and a trigger-parity companion artifact
+  - Fixed the rescoring artifact writer so baseline/updated summaries are compared from deep copies rather than being polluted by in-place summary updates.
+- Commands:
+  - `python -m py_compile "E:\99_docs_analysis\integration_workspace\scripts\analyze_mother_you_face_column_calibration.py"`
+  - `python -m py_compile "E:\99_docs_analysis\integration_workspace\scripts\apply_mother_you_face_column_rescore.py"`
+  - `python "E:\99_docs_analysis\integration_workspace\scripts\analyze_mother_you_face_column_calibration.py" --spans-json "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\activity_token_span_hypothesis.json" --classification-json "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\activity_token_span_classification_posetorsoanchor.json" --cache-dir "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\continuous_feature_cache" --output-json "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\mother_you_face_column_calibration_analysis.json" --mirror-input 1 --prototype-groups-per-class 6`
+  - `python "E:\99_docs_analysis\integration_workspace\scripts\apply_mother_you_face_column_rescore.py" --classification-json "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\activity_token_span_classification_posetorsoanchor.json" --cache-dir "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\continuous_feature_cache" --analysis-json "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\mother_you_face_column_calibration_analysis.json" --output-json "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\activity_token_span_classification_motheryou_nosez_rescore.json" --summary-json "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\mother_you_nosez_calibration_experiment_summary.json" --mirror-input 1 --nose-z-offset -1.5 --trigger-csv "E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor\realtime_test_20260331_104210\trigger_segment_alignment.csv" --trigger-output-json "E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor\realtime_test_20260331_104210\mother_you_nosez_trigger_parity.json"`
+- Artifacts:
+  - `reports/realtime_tests_smoke/realtime_test_20260331_023211/mother_you_face_column_calibration_analysis.json`
+  - `reports/realtime_tests_smoke/realtime_test_20260331_023211/activity_token_span_classification_motheryou_nosez_rescore.json`
+  - `reports/realtime_tests_smoke/realtime_test_20260331_023211/mother_you_nosez_calibration_experiment_summary.json`
+  - `reports/realtime_tests_smoke_poseanchor/realtime_test_20260331_104210/mother_you_nosez_trigger_parity.json`
+- Result:
+  - `mother -> you` column-level analysis:
+    - `nose_z` is the first and strongest takeover column by itself:
+      - standalone gap `true_minus_confused_gap = +0.640327`
+      - it already pulls `mother` closer to `you` before adding any other column
+    - the next strongest columns are:
+      - `chin_y` (`+0.247652`)
+      - `nose_y` (`+0.221312`)
+      - `mouth_y` (`+0.218453`)
+      - `mouth_z` (`+0.058322`)
+      - `chin_z` (`+0.051563`)
+    - this is narrower than “face semantics”:
+      - dominant mismatch is `torso_center`-normalized `left_face_vectors.nose_z` overshoot
+      - secondary drift exists in nearby face `y/z` columns, but `nose_z` is the concrete entry point
+    - full-vector distances confirm the same story:
+      - baseline `mother_l2 = 1.639467`
+      - baseline `you_l2 = 0.883996`
+      - baseline `mother_minus_you_l2 = +0.755472`
+    - `nose_z` offset scan shows the smallest tested fix that flips the full/focus distances is `-1.5`:
+      - adjusted full `mother_minus_you_l2 = -0.009736`
+      - adjusted focus `mother_minus_you_l2 = -0.031737`
+      - `-1.0` is not enough, so this is not random noise; the column really is over-scaled on the `mother` span
+  - Minimal repair experiment:
+    - patch type: residual-specific `nose_z` calibration only
+    - scope: only spans with baseline top1=`you`
+    - offset: `nose_z += -1.5`
+    - exact-span result:
+      - accuracy `0.25 -> 0.375`
+      - class counts `{like: 2, i: 1, you: 1, no_sign: 3, student: 1} -> {like: 2, i: 1, mother: 1, no_sign: 3, student: 1}`
+      - `mother: you -> mother`
+      - `like` and `you` remain unchanged
+    - trigger-parity sign:
+      - poseanchor trigger segment `3` (`reference_label=mother`) changes `raw_label: you -> mother`
+      - the segment is still `trigger_reject`, so this is only a serving-side direction-of-travel signal, not a final serving fix
+- Improvement:
+  - Yes.
+  - Positive criteria satisfied:
+    - exact-span accuracy improved
+    - class coverage improved by recovering `mother`
+    - `mother -> you` confusion was removed on exact spans
+    - prototype / column distances moved in the correct direction
+    - trigger parity showed a matching raw-label shift for the `mother` segment
+- Conclusion:
+  - The dominant `mother -> you` residual is now concrete at implementation level:
+    - primary cause: `left_face_vectors.nose_z`
+    - failure mode: overscaled `z` semantics under the retained `pose_local_anchor = torso_center` scaffold
+    - secondary context: nearby `chin_y / nose_y / mouth_y / chin_z / mouth_z` drift reinforces the error but does not precede it
+  - This is now supported by two independent validation routes:
+    - prototype / per-column analysis (`mother_you_face_column_calibration_analysis.json`)
+    - direct exact-span and trigger-parity repair experiment (`mother_you_nosez_calibration_experiment_summary.json`, `mother_you_nosez_trigger_parity.json`)
+  - `you -> i` remains untouched by the successful face-column patch and should now be treated as a non-face-dominant residual.
+- Falsified or downgraded hypotheses:
+  - 已降級：`mother -> you` 主要是 `nose_z + chin_z + mouth_z` 必須同時 joint 修補；本輪證據顯示 `nose_z` 單欄先 takeover，joint drift 是次級。
+  - 已降級：`mother -> you` 需要全域 face-reference remap 才能修；本輪正向結果來自 residual-specific single-column calibration。
+  - 正式標記：`you -> i` 是 non-face-dominant residual，不再強迫與 `mother -> you` 共用同一 face-only patch。
+- `you -> i` non-face-dominant residual:
+  - Yes.
+  - This round leaves `you -> i` unchanged while recovering `mother`, which is exactly what the previous face-touch report predicted.
+- Next single mainline:
+  - Keep `pose_local_anchor = torso_center` and the new `mother`-only `nose_z` calibration as the current best evidence-backed patch.
+  - Do not reopen threshold tuning yet.
+  - The next narrow cut should stay single-threaded on productizing the same residual-specific fix path:
+    - move the same `mother`-like `nose_z` calibration into the serving scorer path
+    - verify whether the corrected `mother` raw label can survive downstream emit logic without degrading other tokens
+
+## Round 13
+- Time:
+  - `2026-03-31 11:44:32 +08:00`
+- Hypothesis:
+  - Keep `pose_local_anchor = torso_center`.
+  - Move the accepted `mother`-only `nose_z` calibration into the shared serving scorer path so trigger serving sees the corrected `mother` raw label before emit gating.
+  - The first serving implementation is intentionally minimal:
+    - load `mother/you` left-face prototypes from the checkpoint-matched dataset pipeline
+    - apply the same residual-specific `nose_z += -1.5` rule only when scorer top1 is `you`
+    - flip `mother/you` inside the scorer without touching thresholds or unrelated tokens
+- Modified files:
+  - `integration_workspace/src/app/sign_sentence_engine.py`
+  - `integration_workspace/scripts/run_scripted_video_realtime_regression.py`
+  - `reports/continuous_inference_repair_progress.md`
+- Logic changed:
+  - Added runtime scorer flags:
+    - `ENABLE_MOTHER_NOSE_Z_CALIBRATION`
+    - `MOTHER_NOSE_Z_OFFSET`
+  - Added checkpoint-aware prototype loading for `mother/you` left-face vectors so serving uses the current `artifacts_webcam9_relative_coord_v1` training line instead of the stale default `dataset_pipeline`.
+  - Moved the residual-specific `mother` calibration into `_predict_sequence_scores()`:
+    - only active under `pose_local_anchor = torso_center`
+    - only active when scorer top1 is `you`
+    - the first implementation performed a label-level `mother/you` scorer swap after the calibration predicate fired
+  - Extended continuous regression session params so artifacts record:
+    - `pose_local_anchor`
+    - calibration enabled/disabled
+    - `nose_z` offset
+    - whether serving prototypes were ready
+- Commands:
+  - `python -m py_compile integration_workspace/src/app/sign_sentence_engine.py integration_workspace/scripts/run_scripted_video_realtime_regression.py`
+  - light runtime sanity check with `POSE_LOCAL_ANCHOR=torso_center`, `ENABLE_MOTHER_NOSE_Z_CALIBRATION=1`, `MOTHER_NOSE_Z_OFFSET=-1.5`
+  - `python integration_workspace/scripts/run_scripted_video_realtime_regression.py --mode continuous --engine-mode trigger_based --video "E:\99_docs_analysis\i_you_mother_father_techer_sudent_want_like (1).mp4" --checkpoint "E:\99_docs_analysis\integration_workspace\artifacts_webcam9_relative_coord_v1\models\multibranch_baseline.pt" --gesture-profile "E:\99_docs_analysis\metadata\webcam9_gesture_profiles.json" --output-root "E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor" --sequence-length 30 --confidence-threshold 0.35 --mirror-input`
+    - env:
+      - `POSE_LOCAL_ANCHOR=torso_center`
+      - `ENABLE_MOTHER_NOSE_Z_CALIBRATION=1`
+      - `MOTHER_NOSE_Z_OFFSET=-1.5`
+- Artifacts:
+  - `reports/realtime_tests_smoke_poseanchor/realtime_test_20260331_114432/session_params.json`
+  - `reports/realtime_tests_smoke_poseanchor/realtime_test_20260331_114432/session_summary.json`
+  - `reports/realtime_tests_smoke_poseanchor/realtime_test_20260331_114432/trigger_segment_alignment.csv`
+  - `reports/realtime_tests_smoke_poseanchor/realtime_test_20260331_114432/trigger_segment_confusion.json`
+- Result:
+  - Serving prototypes loaded successfully for the intended checkpoint line:
+    - `prototype_labels = ['mother', 'you']`
+  - The scorer-path patch corrected the target raw label:
+    - trigger segment `3` (`reference_label=mother`) changed `raw_label: you -> mother`
+    - raw confidence stayed `0.538212`
+    - top margin stayed `0.357765`
+  - Downstream emit still rejected the corrected segment because margin did not move:
+    - `decision_status: trigger_reject -> trigger_reject`
+    - `emitted_label: '' -> ''`
+  - Session-level metrics did not improve:
+    - WER stayed `0.875`
+    - emitted tokens stayed `student / i`
+    - `trigger_emit` count stayed `2`
+  - Non-target behavior stayed unchanged:
+    - `you -> i`, `want -> student`, and `like -> i` remained identical to the baseline poseanchor session
+- Improvement:
+  - Partial only.
+  - Positive signal:
+    - the serving path now consumes the corrected `mother` raw label instead of the stale `you`
+  - But no accepted serving improvement yet because:
+    - emit gating outcome did not change
+    - WER and class coverage were unchanged
+- Conclusion:
+  - The hypothesis “moving the accepted `mother` calibration into serving as a raw-label swap is sufficient for downstream emit” is falsified.
+  - The blocker is now narrower than generic serving parity:
+    - scorer-path label correction alone does not increase the confidence/margin that the trigger emit gate actually uses
+    - the remaining problem is not stale raw-label propagation; it is score shaping inside the same `mother/you` pair
+- Falsified or downgraded hypotheses:
+  - 已證偽：把 `mother`-only `nose_z` calibration 以純 `raw_label` swap 形式移入 serving scorer，就足以穿過 downstream emit gate。
+  - 已降級：downstream emit failure 的主因是「校正後 raw label 沒有進入 serving 路徑」；本輪證據顯示 raw label 已經修正，但 margin 未同步成長。
+- Failed hypothesis:
+  - `mother` scorer correction as a label-only swap is enough to change `trigger_reject -> trigger_emit`.
+- Next single mainline:
+  - Keep the same scaffold and the same residual-specific `nose_z` predicate.
+  - Narrow the serving repair further:
+    - stay inside the same `mother/you` scorer path
+    - replace label-only swap with a pairwise logit correction derived from the same calibration evidence
+    - verify whether the corrected `mother` score can exceed the existing emit margin without changing unrelated tokens
+
+## Round 14
+- Time:
+  - `2026-03-31 11:50:50 +08:00`
+- Hypothesis:
+  - The Round 13 failure was specifically caused by unchanged scorer margin, not by the `mother` calibration predicate itself.
+  - Therefore the narrowest next cut is to keep the exact same residual-specific `nose_z` gate, but convert its serving implementation from a label-only swap into a pairwise `mother/you` logit correction.
+  - If the pairwise logit update works, the `mother` segment should cross the existing emit gate with no threshold tuning and with no change to unrelated segments.
+- Modified files:
+  - `integration_workspace/src/app/sign_sentence_engine.py`
+  - `reports/continuous_inference_repair_progress.md`
+- Logic changed:
+  - Kept the same serving activation conditions from Round 13:
+    - `pose_local_anchor = torso_center`
+    - `top1 = you`
+    - `mother` calibration predicate must flip prototype distance sign after `nose_z += -1.5`
+  - Replaced the Round 13 label-only swap with a pairwise logit correction:
+    - compute the `mother-vs-you` distance gain implied by the accepted `nose_z` calibration
+    - lift the `mother` logit by that gain on top of the `mother/you` pair
+    - demote `you` back to the lower pairwise logit
+    - recompute probabilities from the updated scorer logits before emit gating
+  - This keeps the repair inside the serving scorer path and still avoids threshold tuning or any unrelated class remap.
+- Commands:
+  - `python -m py_compile integration_workspace/src/app/sign_sentence_engine.py`
+  - light runtime sanity check with `POSE_LOCAL_ANCHOR=torso_center`, `ENABLE_MOTHER_NOSE_Z_CALIBRATION=1`, `MOTHER_NOSE_Z_OFFSET=-1.5`
+  - `python integration_workspace/scripts/run_scripted_video_realtime_regression.py --mode continuous --engine-mode trigger_based --video "E:\99_docs_analysis\i_you_mother_father_techer_sudent_want_like (1).mp4" --checkpoint "E:\99_docs_analysis\integration_workspace\artifacts_webcam9_relative_coord_v1\models\multibranch_baseline.pt" --gesture-profile "E:\99_docs_analysis\metadata\webcam9_gesture_profiles.json" --output-root "E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor" --sequence-length 30 --confidence-threshold 0.35 --mirror-input`
+    - env:
+      - `POSE_LOCAL_ANCHOR=torso_center`
+      - `ENABLE_MOTHER_NOSE_Z_CALIBRATION=1`
+      - `MOTHER_NOSE_Z_OFFSET=-1.5`
+  - inline Python command to write `mother_nosez_serving_validation_summary.json`
+- Artifacts:
+  - `reports/realtime_tests_smoke_poseanchor/realtime_test_20260331_115050/session_params.json`
+  - `reports/realtime_tests_smoke_poseanchor/realtime_test_20260331_115050/session_summary.json`
+  - `reports/realtime_tests_smoke_poseanchor/realtime_test_20260331_115050/trigger_segment_alignment.csv`
+  - `reports/realtime_tests_smoke_poseanchor/realtime_test_20260331_115050/trigger_segment_confusion.json`
+  - `reports/realtime_tests_smoke_poseanchor/realtime_test_20260331_115050/mother_nosez_serving_validation_summary.json`
+- Result:
+  - The corrected `mother` raw label now survives downstream emit logic:
+    - trigger segment `3` (`reference_label=mother`) becomes:
+      - `raw_label: you -> mother`
+      - `raw_confidence: 0.538212 -> 0.739960`
+      - `top_margin: 0.357765 -> 0.638347`
+      - `decision_status: trigger_reject -> trigger_emit`
+      - `emitted_label: '' -> mother`
+  - Session-level serving metrics improved:
+    - WER `0.875 -> 0.750`
+    - emitted tokens `student / i -> mother / student / i`
+    - emitted label counts `{student: 1, i: 1} -> {mother: 1, student: 1, i: 1}`
+    - `trigger_emit` count `2 -> 3`
+    - `trigger_reject` count `9 -> 8`
+  - The improvement is tightly localized to the target token:
+    - `you -> i` segment `2` is unchanged
+      - raw label `i`
+      - confidence `0.492276`
+      - margin `0.105101`
+      - still `trigger_reject`
+    - `want -> student` segment `9` is unchanged
+    - `like -> i` segment `13` is unchanged
+  - Side effect:
+    - `no_sign` recall is slightly lower but still very high:
+      - `1.0000 -> 0.9981`
+    - frame macro F1 is essentially flat (`0.06215 -> 0.06206`)
+- Improvement:
+  - Yes.
+  - Accepted improvement criteria satisfied on the serving path:
+    - class coverage improved by recovering emitted `mother`
+    - WER improved
+    - wrong/reject behavior on the target token improved (`trigger_reject -> trigger_emit`)
+    - the corrected score moved prototype-supported directionally before emit gating
+- Conclusion:
+  - The current mainline is now productized enough to be accepted:
+    - keep `pose_local_anchor = torso_center`
+    - keep the `mother`-only `nose_z` predicate
+    - serving must implement it as a pairwise `mother/you` logit correction, not a label-only swap
+  - This is now supported by two serving-side validations:
+    - Round 13 showed the corrected raw label does enter the scorer path
+    - Round 14 showed the pairwise score correction is what actually lets the corrected `mother` survive emit gating
+  - `you -> i` remains unchanged, which is consistent with the earlier conclusion that it is a non-face-dominant residual and should not be forced into the same face-only repair.
+- Falsified or downgraded hypotheses:
+  - 已證偽：`mother` serving fix 需要 threshold tuning 才能過 gate；本輪在不改 threshold 的前提下，pairwise logit correction 已讓 `mother` 通過 emit。
+  - 已降級：同一個 serving face-only patch 會順便修掉 `you -> i`；本輪顯示 `you -> i` 完全不變。
+  - 已降級：moving calibration into serving 只能提供方向訊號、不可能直接改善 WER；本輪已在 serving smoke 中拿到 WER 正向改善。
+- Next single mainline:
+  - Keep the new `mother` serving scorer correction as the best-known version.
+  - Do not reopen `mother` thresholds or global face remaps.
+  - The next narrow cut should move to the remaining non-face-dominant residual:
+    - keep `pose_local_anchor = torso_center`
+    - leave the `mother` scorer fix untouched
+    - isolate `you -> i` inside non-face groups only (`pose graph`, `hand graph`, `explicit finger states`) on the same cached/serving scaffold before changing any other serving behavior
+
+## Round 15
+- Time:
+  - `2026-03-31 13:11:48 +08:00`
+- Hypothesis:
+  - Keep `pose_local_anchor = torso_center` and the accepted `mother` scorer fix untouched.
+  - Shrink `you -> i` to one non-face subgroup first, then test the narrowest feature-space repair on that same subgroup before touching serving.
+  - The first minimal repair candidate is:
+    - `left_body_vectors`
+    - specifically the duplicated body-relative vertical semantics in `left_to_chest_center_y` and `left_to_torso_center_y`
+    - applied only when baseline top1 is `i` and the calibrated `you/i` subgroup distance flips sign
+- Modified files:
+  - `integration_workspace/scripts/analyze_you_i_nonface_residual.py`
+  - `integration_workspace/scripts/apply_you_i_left_body_calibration.py`
+  - `reports/continuous_inference_repair_progress.md`
+- Logic changed:
+  - Added a dedicated `you/i` non-face analysis script that works on the same cached exact-span scaffold and rebuilds the `torso_center` pose stream before scoring subgroup distances.
+  - The new artifact localizes the residual to:
+    - dominant subgroup: `left_body_vectors`
+    - dominant semantics: left-hand body-relative pointing against shoulder/chest/torso references
+    - strongest confused columns:
+      - `left_to_chest_center_y`
+      - `left_to_torso_center_y`
+  - Added a feature-space calibration experiment that:
+    - shifts `left_to_chest_center_y` and `left_to_torso_center_y` by `-0.035`
+    - only on spans whose baseline top1 is `i`
+    - only when the `left_body_vectors` prototype distance flips from `i`-closer to `you`-closer
+- Commands:
+  - `python -m py_compile integration_workspace/scripts/analyze_you_i_nonface_residual.py integration_workspace/scripts/apply_you_i_left_body_calibration.py`
+  - `python integration_workspace/scripts/analyze_you_i_nonface_residual.py --spans-json reports/realtime_tests_smoke/realtime_test_20260331_023211/activity_token_span_hypothesis.json --classification-json reports/realtime_tests_smoke/realtime_test_20260331_023211/activity_token_span_classification_posetorsoanchor.json --cache-dir reports/realtime_tests_smoke/realtime_test_20260331_023211/continuous_feature_cache --output-json reports/realtime_tests_smoke/realtime_test_20260331_023211/you_i_nonface_residual_analysis.json`
+  - `python integration_workspace/scripts/apply_you_i_left_body_calibration.py --classification-json reports/realtime_tests_smoke/realtime_test_20260331_023211/activity_token_span_classification_posetorsoanchor.json --cache-dir reports/realtime_tests_smoke/realtime_test_20260331_023211/continuous_feature_cache --checkpoint integration_workspace/artifacts_webcam9_relative_coord_v1/models/multibranch_baseline.pt --analysis-json reports/realtime_tests_smoke/realtime_test_20260331_023211/you_i_nonface_residual_analysis.json --output-json reports/realtime_tests_smoke/realtime_test_20260331_023211/activity_token_span_classification_youi_leftbody_calibrated.json --summary-json reports/realtime_tests_smoke/realtime_test_20260331_023211/you_i_leftbody_calibration_experiment_summary.json`
+- Artifacts:
+  - `reports/realtime_tests_smoke/realtime_test_20260331_023211/you_i_nonface_residual_analysis.json`
+  - `reports/realtime_tests_smoke/realtime_test_20260331_023211/activity_token_span_classification_youi_leftbody_calibrated.json`
+  - `reports/realtime_tests_smoke/realtime_test_20260331_023211/you_i_leftbody_calibration_experiment_summary.json`
+- Result:
+  - The dedicated subgroup analysis is stable under the correct `torso_center` scaffold:
+    - `left_body_vectors` is the only clearly positive non-face subgroup
+    - `left_body_vectors true_minus_confused_l2 = +0.045535`
+    - takeover begins at offset `0`, so the confusion is present from the start of the sampled span rather than late tail drift
+  - Column-level root cause is now implementation-grade:
+    - `left_to_chest_center_y`
+      - span `-0.194514`
+      - `you` prototype `-0.487056`
+      - `i` prototype `-0.188255`
+      - gap favors `i` by `+0.286283`
+    - `left_to_torso_center_y`
+      - same pattern and magnitude as chest-relative `y`
+  - The first feature-space repair hypothesis is falsified:
+    - after calibrating both `y` columns by `-0.035`, the subgroup distance does flip
+      - `left_body you_minus_i_l2: +0.045536 -> -0.004176`
+    - but the model output does not improve
+      - exact-span accuracy stays `0.25`
+      - `you -> i` remains unchanged
+      - `mother -> you` remains unchanged
+      - updated top3 for the `you` span becomes more confident in `i`
+        - `i: 0.549188 / 2.941499 -> 0.559997 / 2.987731`
+        - `like: 0.300012 / 2.336882 -> 0.294655 / 2.345603`
+- Improvement:
+  - No accepted improvement.
+  - Positive learning only:
+    - the dominant non-face residual is real and concrete at column level
+    - but direct feature-space calibration on those columns is not a sufficient repair path for the scorer
+- Conclusion:
+  - `you -> i` is not fixable by directly rewriting the `left_body_vectors` chest/torso `y` columns inside feature space.
+  - The evidence-backed subgroup is still correct, but the useful repair must stay narrower:
+    - use the same subgroup evidence only to correct the `you/i` pair inside the scorer
+    - do not perturb the broader feature manifold, because that path does not move the model toward `you`
+- Falsified or downgraded hypotheses:
+  - 已證偽：只要把 `left_to_chest_center_y` / `left_to_torso_center_y` 校正到 prototype 正確一側，整個 scorer 就會自然把 `you` 拉回來。
+  - 已降級：`you -> i` 的最小可實作修補應該是 feature-space column rewrite；本輪證據顯示 scorer 對這種直接改寫不買單。
+- Failed hypothesis:
+  - Direct `left_body_vectors` chest/torso-`y` feature calibration is sufficient to repair `you -> i`.
+- Next single mainline:
+  - Keep the same `left_body_vectors` evidence and the same `torso_center` scaffold.
+  - Narrow further inside the same `you/i` tree:
+    - stop editing the feature manifold directly
+    - convert the accepted `left_body_vectors` chest/torso-`y` evidence into a pairwise `you/i` logit correction only
+    - verify exact-span accuracy before touching serving
+
+## Round 16
+- Time:
+  - `2026-03-31 13:24:10 +08:00`
+- Hypothesis:
+  - Round 15 showed the subgroup evidence is real but direct feature rewrite is the wrong lever.
+  - Therefore the next narrow cut is:
+    - keep the same `left_body_vectors` chest/torso-`y` predicate
+    - stop modifying sequence features
+    - use the implied `you-vs-i` distance gain only to reorder the `you/i` pairwise logits
+    - leave `like`, `mother`, thresholds, and all unrelated classes untouched
+- Modified files:
+  - `integration_workspace/scripts/apply_you_i_leftbody_pairwise_rescore.py`
+  - `reports/continuous_inference_repair_progress.md`
+- Logic changed:
+  - Added an exact-span `you/i` pairwise rescore experiment that:
+    - rebuilds the `torso_center` pose stream
+    - reloads full checkpoint logits on the target span
+    - applies the same residual-specific predicate as Round 15
+    - computes `pairwise_logit_gain = baseline_gap - adjusted_gap`
+    - lifts only the `you` logit above the `i` logit by that gain
+    - demotes only the `i` logit inside the pair
+    - keeps `like` and all other logits unchanged
+- Commands:
+  - `python -m py_compile integration_workspace/scripts/apply_you_i_leftbody_pairwise_rescore.py`
+  - `python integration_workspace/scripts/apply_you_i_leftbody_pairwise_rescore.py --classification-json reports/realtime_tests_smoke/realtime_test_20260331_023211/activity_token_span_classification_posetorsoanchor.json --cache-dir reports/realtime_tests_smoke/realtime_test_20260331_023211/continuous_feature_cache --checkpoint integration_workspace/artifacts_webcam9_relative_coord_v1/models/multibranch_baseline.pt --analysis-json reports/realtime_tests_smoke/realtime_test_20260331_023211/you_i_nonface_residual_analysis.json --output-json reports/realtime_tests_smoke/realtime_test_20260331_023211/activity_token_span_classification_youi_leftbody_pairwise_rescore.json --summary-json reports/realtime_tests_smoke/realtime_test_20260331_023211/you_i_leftbody_pairwise_rescore_summary.json`
+- Artifacts:
+  - `reports/realtime_tests_smoke/realtime_test_20260331_023211/activity_token_span_classification_youi_leftbody_pairwise_rescore.json`
+  - `reports/realtime_tests_smoke/realtime_test_20260331_023211/you_i_leftbody_pairwise_rescore_summary.json`
+- Result:
+  - The pairwise-only repair succeeds on exact spans without disturbing the accepted `mother` fix line:
+    - exact-span accuracy `0.25 -> 0.375`
+    - predicted label counts `{like: 2, i: 1, you: 1, no_sign: 3, student: 1} -> {like: 2, you: 2, no_sign: 3, student: 1}`
+    - `you -> i` is removed and replaced by `you -> you`
+    - `mother -> you` remains unchanged
+  - The repaired `you` span stays localized to the intended pair:
+    - subgroup predicate:
+      - `left_body you_minus_i_l2: +0.045536 -> -0.004176`
+    - pairwise logit gain:
+      - `+0.049713`
+    - updated top3:
+      - `you: 0.561463 / 2.991212`
+      - `like: 0.291843 / 2.336882`
+      - `no_sign: 0.112244 / 1.381345`
+  - Non-target labels stay stable on this exact-span pass:
+    - `mother` remains `you`
+    - `student` remains `student`
+    - `want` remains `no_sign`
+    - `like` remains `like`
+- Improvement:
+  - Yes.
+  - Accepted criteria satisfied on exact-span validation:
+    - exact-span accuracy improved
+    - `you -> i` confusion was removed
+    - class coverage improved by recovering emitted `you` at exact-span level
+    - the fix stayed inside the intended `you/i` pair and did not disturb `mother`
+- Conclusion:
+  - The current best `you -> i` cut is now concrete at implementation level:
+    - dominant subgroup: `left_body_vectors`
+    - concrete mismatch: duplicated chest/torso body-relative `y` semantics
+    - usable repair path: pairwise `you/i` logit correction
+    - unusable repair path: direct feature-space rewrite of those columns
+  - This mirrors the earlier `mother` lesson:
+    - the useful signal lives in a narrow subgroup predicate
+    - but the serving-safe correction must be applied inside the confused pair, not as a broad feature remap
+- Falsified or downgraded hypotheses:
+  - 已降級：`you -> i` 需要回頭做 broader pose/hand/finger ablation 才能推進；本輪已經在單一 subgroup 上拿到正向 exact-span 修補。
+  - 已降級：`like` 是必須同時一起修的主線；本輪 pairwise 修補保持 `like` logit 不動也能恢復 `you`。
+- Next single mainline:
+  - Keep the accepted `mother` scorer fix untouched.
+  - Keep the accepted `you/i` exact-span pairwise repair untouched.
+  - The next narrow cut should stay on the same repair line and only do serving productization:
+    - move the same `left_body_vectors`-gated `you/i` pairwise logit correction into the serving scorer path
+    - verify whether the corrected `you` raw label appears on the trigger segment without regressing `mother`
+
+## Round 17
+- Time:
+  - `2026-03-31 12:38:00 +08:00`
+- Mainline:
+  - Keep the accepted `mother` serving fix untouched.
+  - Productize the accepted `left_body_vectors`-gated `you/i` pairwise correction into the same `torso_center` serving scorer path and verify trigger raw label / confidence / margin / emit.
+- Hypothesis:
+  - The exact-span `you/i` pairwise correction is already narrow enough that moving it into serving should be sufficient to recover the `you` trigger segment without harming `mother`.
+- Modified files:
+  - `integration_workspace/src/app/sign_sentence_engine.py`
+  - `integration_workspace/scripts/run_scripted_video_realtime_regression.py`
+  - `reports/continuous_inference_repair_progress.md`
+- Logic changed:
+  - Added serving-side runtime flags and prototype loading for `you/i` left-body calibration.
+  - Moved the exact-span-validated `left_to_chest_center_y / left_to_torso_center_y`-gated pairwise `you/i` logit correction into `_predict_sequence_scores()`.
+  - Wired decoder/session artifacts so the serving run records whether the `you/i` scorer productization is active.
+- Commands:
+  - `python -m py_compile integration_workspace/src/app/sign_sentence_engine.py integration_workspace/scripts/run_scripted_video_realtime_regression.py`
+  - `POSE_LOCAL_ANCHOR=torso_center ENABLE_MOTHER_NOSE_Z_CALIBRATION=1 MOTHER_NOSE_Z_OFFSET=-1.5 ENABLE_YOU_I_LEFTBODY_CALIBRATION=1 YOU_I_LEFTBODY_Y_OFFSET=-0.035 python integration_workspace/scripts/run_scripted_video_realtime_regression.py --mode continuous --engine-mode trigger_based --video "E:\99_docs_analysis\i_you_mother_father_techer_sudent_want_like (1).mp4" --checkpoint "E:\99_docs_analysis\integration_workspace\artifacts_webcam9_relative_coord_v1\models\multibranch_baseline.pt" --gesture-profile "E:\99_docs_analysis\metadata\webcam9_gesture_profiles.json" --output-root "E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor" --sequence-length 30 --confidence-threshold 0.35 --mirror-input`
+- Artifacts:
+  - `reports/realtime_tests_smoke_poseanchor/realtime_test_20260331_123800/session_summary.json`
+  - `reports/realtime_tests_smoke_poseanchor/realtime_test_20260331_123800/trigger_segment_alignment.csv`
+  - `reports/realtime_tests_smoke_poseanchor/realtime_test_20260331_123800/you_i_serving_validation_summary.json`
+  - `reports/realtime_tests_smoke_poseanchor/realtime_test_20260331_123800/you_i_serving_margin_mismatch_analysis.json`
+- Result:
+  - The scorer productization is real and reaches the serving path:
+    - `you` segment raw label `i -> you`
+    - raw confidence `0.492276 -> 0.505200`
+    - top margin `0.105101 -> 0.127881`
+  - But serving emit still fails:
+    - `decision_status` stays `trigger_reject`
+    - emitted tokens stay `mother / student / i`
+    - WER stays `0.750`
+  - `mother` stays stable:
+    - raw label `mother`
+    - confidence `0.739960`
+    - margin `0.638347`
+    - `trigger_emit` preserved
+- Improvement:
+  - Partial only.
+  - Accepted improvement at serving raw-label stage, but not at serving emit stage.
+- Dominant mismatch learned:
+  - The blocker is no longer `you -> i` pair ordering.
+  - The remaining serving mismatch is downstream score separation against `like` on the trigger-trimmed `you` window.
+- Failed hypothesis:
+  - Direct productization of the exact-span `you/i` pairwise correction is sufficient to recover serving emit.
+- Mother fix stable:
+  - Yes.
+- Next single mainline:
+  - Keep the accepted `mother` fix and the accepted `you/i` scorer productization unchanged.
+  - Do not touch thresholds.
+  - Isolate the smallest serving-only mismatch inside the remaining `you-vs-like` margin defect.
+
+## Round 18
+- Time:
+  - `2026-03-31 13:03:49 +08:00`
+- Mainline:
+  - Keep the accepted `mother` fix and `you/i` serving scorer fix untouched.
+  - Test whether a residual-specific trigger-only frontloaded resample can recover the remaining `you-vs-like` margin without changing thresholds.
+- Hypothesis:
+  - The remaining serving reject may come from the uniform trigger resample diluting early `you` evidence.
+  - Therefore a very narrow frontloaded resample, gated to the same `you`/`like` low-margin residual and the same `left_body_vectors` sign-flip, might recover enough natural separation to pass serving emit.
+- Modified files:
+  - `integration_workspace/src/app/sign_sentence_engine.py`
+  - `integration_workspace/scripts/run_scripted_video_realtime_regression.py`
+  - `reports/continuous_inference_repair_progress.md`
+- Logic changed:
+  - Added an opt-in trigger-only fallback rescore behind runtime flags:
+    - `ENABLE_YOU_LIKE_FRONTLOADED_RESCORE`
+    - `YOU_LIKE_FRONTLOAD_POWER`
+  - The fallback only even considers firing when all of the following hold:
+    - `pose_local_anchor=torso_center`
+    - raw top1 is `you`
+    - runner-up is `like`
+    - the same `you/i` left-body sign-flip gate is active
+    - the segment is still below current serving emit gates
+  - Added artifact/debug fields so frontloaded attempts and sampled indices are visible in `trigger_segment_alignment.csv`.
+- Commands:
+  - `python -m py_compile integration_workspace/src/app/sign_sentence_engine.py integration_workspace/scripts/run_scripted_video_realtime_regression.py`
+  - `POSE_LOCAL_ANCHOR=torso_center ENABLE_MOTHER_NOSE_Z_CALIBRATION=1 MOTHER_NOSE_Z_OFFSET=-1.5 ENABLE_YOU_I_LEFTBODY_CALIBRATION=1 YOU_I_LEFTBODY_Y_OFFSET=-0.035 ENABLE_YOU_LIKE_FRONTLOADED_RESCORE=1 YOU_LIKE_FRONTLOAD_POWER=1.64 python integration_workspace/scripts/run_scripted_video_realtime_regression.py --mode continuous --engine-mode trigger_based --video "E:\99_docs_analysis\i_you_mother_father_techer_sudent_want_like (1).mp4" --checkpoint "E:\99_docs_analysis\integration_workspace\artifacts_webcam9_relative_coord_v1\models\multibranch_baseline.pt" --gesture-profile "E:\99_docs_analysis\metadata\webcam9_gesture_profiles.json" --output-root "E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor" --sequence-length 30 --confidence-threshold 0.35 --mirror-input`
+  - Additional inline analysis commands:
+    - frontloaded-power sweep on the trigger `you` segment
+    - gesture-profile aggregation on the best frontloaded window
+- Artifacts:
+  - `reports/realtime_tests_smoke_poseanchor/realtime_test_20260331_130349/session_summary.json`
+  - `reports/realtime_tests_smoke_poseanchor/realtime_test_20260331_130349/trigger_segment_alignment.csv`
+  - `reports/realtime_tests_smoke_poseanchor/realtime_test_20260331_130349/you_i_serving_validation_summary.json`
+  - `reports/realtime_tests_smoke_poseanchor/realtime_test_20260331_130349/you_like_frontload_sweep_summary.json`
+- Result:
+  - The new fallback path is correctly wired and recorded in session params.
+  - It does not get accepted at runtime, and serving output stays unchanged:
+    - `you` segment remains `raw_label=you`
+    - raw confidence stays `0.505200`
+    - top margin stays `0.127881`
+    - `decision_status` stays `trigger_reject`
+    - emitted tokens stay `mother / student / i`
+  - The reason is now concrete and narrow:
+    - current trigger gate is `emit_confidence_threshold=0.6`, `min_top_margin=0.5`
+    - accepted fallback candidate at runtime power `1.64` reaches `you=0.637827`, `margin=0.426810`
+    - best offline frontloaded candidate only reaches `you=0.670391`, `margin=0.489220`
+    - therefore no frontloaded resample crosses the existing `0.5` top-margin gate while keeping `you` as top1
+  - Independent second check also downgrades the gesture-profile path:
+    - even on the best frontloaded sample, aggregate profile evidence still leans slightly toward `like`
+    - mean profile probabilities on that sample are approximately `you=0.120505`, `like=0.124370`
+- Improvement:
+  - No accepted serving improvement.
+  - Positive learning only:
+    - a trigger-only resample can recover most of the missing `you` confidence
+    - but it cannot close the final serving margin defect under the current gate
+- Failed hypotheses:
+  - A narrow trigger-only frontloaded resample can naturally recover enough `you-vs-like` separation to pass the current `0.5` serving top-margin gate.
+  - Aggregated gesture-profile evidence on that frontloaded `you` window favors `you` strongly enough to justify the remaining margin recovery.
+- Dominant mismatch learned:
+  - The `you` serving path is now blocked by a very small but still real scorer-only `you-vs-like` margin deficit:
+    - after the best trigger-resample experiment, the remaining shortfall is about `0.010780` top-margin points
+    - this is no longer a `you-vs-i` problem
+    - it is no longer a broad trigger-window problem
+    - it is not fixable by profile-assist reuse on the current evidence
+- Mother fix stable:
+  - Yes.
+  - `mother` remains `trigger_emit` and the accepted `mother/you` repair line is unchanged.
+- Next single mainline:
+  - Keep the accepted `mother` fix and `you/i` serving scorer fix unchanged.
+  - Keep threshold / margin settings unchanged.
+  - Stop changing trigger sampling.
+  - Isolate the smallest scorer-only `you-vs-like` pairwise correction that can close the remaining ~`0.011` top-margin gap on the serving `you` segment without regressing `mother` or collateral tokens.
+
+## Round 19
+- Time:
+  - `2026-03-31 13:30:58 +08:00`
+- Mainline:
+  - Keep the accepted `mother` fix and `you/i` serving scorer fix unchanged.
+  - Productize the smallest scorer-path `you-vs-like` pairwise correction that directly closes the remaining serving margin deficit without touching thresholds.
+- Hypothesis:
+  - After the accepted `you/i` fix, the serving `you` segment is already top1=`you` and still lands closer to exact-span `you` than exact-span `like` across every coarse feature group.
+  - Therefore the remaining serving reject is not a feature-window mismatch but an under-separated scorer-only `you-vs-like` top2 spacing defect.
+  - A narrow symmetric pairwise logit delta, gated to the same trigger-time residual conditions, should be sufficient to move `you` across the existing serving gate.
+- Modified files:
+  - `integration_workspace/src/app/sign_sentence_engine.py`
+  - `integration_workspace/scripts/run_scripted_video_realtime_regression.py`
+  - `integration_workspace/scripts/analyze_you_like_serving_margin.py`
+  - `reports/continuous_inference_repair_progress.md`
+- Logic changed:
+  - Added a new serving scorer path behind runtime flags:
+    - `ENABLE_YOU_LIKE_PAIRWISE_CALIBRATION`
+    - `YOU_LIKE_PAIRWISE_DELTA`
+  - The new correction is intentionally narrow:
+    - trigger mode only
+    - `pose_local_anchor=torso_center` only
+    - top1 must already be `you`
+    - runner-up must be `like`
+    - the segment must still be below current emit gates
+    - the existing `you/i` left-body sign-flip gate must still be active
+  - When the gate is active, the scorer applies a symmetric `you/like` pairwise delta and then lets the normal downstream emit path decide.
+  - Added serving-path analysis tooling and artifact wiring so the `you-vs-like` root cause, delta sweep, and session-level validation are recorded in artifacts.
+- Commands:
+  - `python -m py_compile E:\99_docs_analysis\integration_workspace\src\app\sign_sentence_engine.py E:\99_docs_analysis\integration_workspace\scripts\run_scripted_video_realtime_regression.py E:\99_docs_analysis\integration_workspace\scripts\analyze_you_like_serving_margin.py`
+  - `python E:\99_docs_analysis\integration_workspace\scripts\analyze_you_like_serving_margin.py --baseline-session E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor\realtime_test_20260331_115050 --current-session E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor\realtime_test_20260331_130349 --exact-classification-json E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\activity_token_span_classification_youi_leftbody_pairwise_rescore.json --cache-dir E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\continuous_feature_cache --checkpoint E:\99_docs_analysis\integration_workspace\artifacts_webcam9_relative_coord_v1\models\multibranch_baseline.pt --gesture-profile E:\99_docs_analysis\metadata\webcam9_gesture_profiles.json --output-json E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor\realtime_test_20260331_130349\you_like_serving_margin_analysis.json`
+  - `POSE_LOCAL_ANCHOR=torso_center ENABLE_MOTHER_NOSE_Z_CALIBRATION=1 MOTHER_NOSE_Z_OFFSET=-1.5 ENABLE_YOU_I_LEFTBODY_CALIBRATION=1 YOU_I_LEFTBODY_Y_OFFSET=-0.035 ENABLE_YOU_LIKE_PAIRWISE_CALIBRATION=1 YOU_LIKE_PAIRWISE_DELTA=0.98 ENABLE_YOU_LIKE_FRONTLOADED_RESCORE=0 python E:\99_docs_analysis\integration_workspace\scripts\run_scripted_video_realtime_regression.py --mode continuous --engine-mode trigger_based --video "E:\99_docs_analysis\i_you_mother_father_techer_sudent_want_like (1).mp4" --checkpoint "E:\99_docs_analysis\integration_workspace\artifacts_webcam9_relative_coord_v1\models\multibranch_baseline.pt" --gesture-profile "E:\99_docs_analysis\metadata\webcam9_gesture_profiles.json" --output-root "E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor" --sequence-length 30 --confidence-threshold 0.35 --mirror-input`
+  - `python E:\99_docs_analysis\integration_workspace\scripts\analyze_you_like_serving_margin.py --baseline-session E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor\realtime_test_20260331_115050 --current-session E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor\realtime_test_20260331_133058 --exact-classification-json E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\activity_token_span_classification_youi_leftbody_pairwise_rescore.json --cache-dir E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\continuous_feature_cache --checkpoint E:\99_docs_analysis\integration_workspace\artifacts_webcam9_relative_coord_v1\models\multibranch_baseline.pt --gesture-profile E:\99_docs_analysis\metadata\webcam9_gesture_profiles.json --output-json E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor\realtime_test_20260331_133058\you_like_serving_margin_analysis.json`
+- Artifacts:
+  - `reports/realtime_tests_smoke_poseanchor/realtime_test_20260331_130349/you_like_serving_margin_analysis.json`
+  - `reports/realtime_tests_smoke_poseanchor/realtime_test_20260331_133058/session_summary.json`
+  - `reports/realtime_tests_smoke_poseanchor/realtime_test_20260331_133058/trigger_segment_alignment.csv`
+  - `reports/realtime_tests_smoke_poseanchor/realtime_test_20260331_133058/you_like_serving_margin_analysis.json`
+  - `reports/realtime_tests_smoke_poseanchor/realtime_test_20260331_133058/you_like_serving_validation_summary.json`
+- Result:
+  - The new analysis narrowed the root cause to a single implementable scorer mismatch:
+    - after the accepted `you/i` fix, serving top1 is already `you`
+    - the serving `you` segment remains closer to exact-span `you` than exact-span `like` across all coarse feature groups
+    - the remaining defect is the residual `you-vs-like` top2 spacing itself
+  - The offline stage report quantifies the missing gap:
+    - serving after `mother` + `you/i` fixes: `you=0.505200`, `margin=0.127881`, `you-like logit gap=0.291863`
+    - exact-span `you` reference after `you/i` fix: `you=0.561682`, `margin=0.269974`, `you-like logit gap=0.655183`
+    - the recommended minimal symmetric pairwise delta is `0.98`
+  - The serving rerun with that gated pairwise correction succeeds:
+    - `you` segment stays `raw_label=you`
+    - raw confidence improves `0.505200 -> 0.702854`
+    - top margin improves `0.127881 -> 0.505838`
+    - `decision_status` changes `trigger_reject -> trigger_emit`
+    - emitted label becomes `you`
+  - Session-level impact also improves:
+    - emitted tokens change `mother / student / i -> you / mother / student / i`
+    - WER improves `0.750 -> 0.625`
+    - class coverage gains the missing `you` emit
+  - Existing accepted fixes stay intact:
+    - `mother` remains `trigger_emit` with `raw_confidence=0.739960`, `top_margin=0.638347`
+    - the accepted `you/i` fix remains in place and keeps the raw `you` segment off the old `i` confusion path
+- Improvement:
+  - Yes.
+  - This is the first serving-path change on the `you-vs-like` line that closes the reject without threshold tuning.
+- Failed hypotheses:
+  - The remaining serving bottleneck is a broad feature-window mismatch between serving `you` and exact-span `you`.
+  - The remaining serving bottleneck still needs trigger-resampling or profile-assist to pass the gate.
+- Dominant mismatch learned:
+  - The dominant serving mismatch on this line was a gated symmetric `you-vs-like` pairwise logit spacing defect, not a broader residual-family issue.
+- Mother fix stable:
+  - Yes.
+  - No regression observed.
+- You/i fix stable:
+  - Yes.
+  - No regression observed.
+- Next single mainline:
+  - Keep the accepted `mother` fix, accepted `you/i` fix, and accepted `you-vs-like` pairwise scorer fix unchanged.
+  - Move to the next highest-value remaining serving residual without reopening thresholds, currently `like -> i` on the main emit segment.
+
+## Round 20
+- Time:
+  - `2026-03-31 14:01:51 +08:00`
+- Mainline:
+  - Keep the accepted `mother`, `you/i`, and `you-vs-like` serving fixes unchanged.
+  - Isolate and productize the smallest scorer-path `like-vs-i` correction on the main emitted `like` segment.
+- Hypothesis:
+  - The remaining `like -> i` error is not a broad serving-window issue.
+  - The main `like` trigger segment is already closer to exact-span `like` than exact-span `i` across every coarse feature group, and dataset location prototypes also place the segment on the `like` side.
+  - Therefore the dominant residual is a scorer-only `like-vs-i` top2 spacing bias, so a narrow subgroup-gated pairwise delta should be enough.
+- Modified files:
+  - `integration_workspace/src/app/sign_sentence_engine.py`
+  - `integration_workspace/scripts/run_scripted_video_realtime_regression.py`
+  - `integration_workspace/scripts/analyze_like_i_serving_margin.py`
+  - `reports/continuous_inference_repair_progress.md`
+- Logic changed:
+  - Added a new opt-in serving scorer path behind runtime flags:
+    - `ENABLE_LIKE_I_PAIRWISE_CALIBRATION`
+    - `LIKE_I_PAIRWISE_DELTA`
+  - The new correction is intentionally narrow:
+    - trigger mode only
+    - `pose_local_anchor=torso_center` only
+    - top1 must be `i`
+    - runner-up must be `like`
+    - serving location prototype gap must already place the segment on the `like` side
+  - When that gate fires, the scorer applies a symmetric `like/i` pairwise delta and then leaves the normal emit path unchanged.
+  - Added a dedicated `like-vs-i` serving analysis script and artifact wiring.
+- Commands:
+  - `python -m py_compile E:\99_docs_analysis\integration_workspace\src\app\sign_sentence_engine.py E:\99_docs_analysis\integration_workspace\scripts\run_scripted_video_realtime_regression.py E:\99_docs_analysis\integration_workspace\scripts\analyze_like_i_serving_margin.py`
+  - `python E:\99_docs_analysis\integration_workspace\scripts\analyze_like_i_serving_margin.py --baseline-session E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor\realtime_test_20260331_133058 --current-session E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor\realtime_test_20260331_133058 --exact-classification-json E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\activity_token_span_classification_youi_leftbody_pairwise_rescore.json --cache-dir E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\continuous_feature_cache --checkpoint E:\99_docs_analysis\integration_workspace\artifacts_webcam9_relative_coord_v1\models\multibranch_baseline.pt --gesture-profile E:\99_docs_analysis\metadata\webcam9_gesture_profiles.json --output-json E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor\realtime_test_20260331_133058\like_i_serving_margin_analysis.json`
+  - `POSE_LOCAL_ANCHOR=torso_center ENABLE_MOTHER_NOSE_Z_CALIBRATION=1 MOTHER_NOSE_Z_OFFSET=-1.5 ENABLE_YOU_I_LEFTBODY_CALIBRATION=1 YOU_I_LEFTBODY_Y_OFFSET=-0.035 ENABLE_YOU_LIKE_PAIRWISE_CALIBRATION=1 YOU_LIKE_PAIRWISE_DELTA=0.98 ENABLE_LIKE_I_PAIRWISE_CALIBRATION=1 LIKE_I_PAIRWISE_DELTA=2.78 ENABLE_YOU_LIKE_FRONTLOADED_RESCORE=0 python E:\99_docs_analysis\integration_workspace\scripts\run_scripted_video_realtime_regression.py --mode continuous --engine-mode trigger_based --video "E:\99_docs_analysis\i_you_mother_father_techer_sudent_want_like (1).mp4" --checkpoint "E:\99_docs_analysis\integration_workspace\artifacts_webcam9_relative_coord_v1\models\multibranch_baseline.pt" --gesture-profile "E:\99_docs_analysis\metadata\webcam9_gesture_profiles.json" --output-root "E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor" --sequence-length 30 --confidence-threshold 0.35 --mirror-input`
+  - `python E:\99_docs_analysis\integration_workspace\scripts\analyze_like_i_serving_margin.py --baseline-session E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor\realtime_test_20260331_133058 --current-session E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor\realtime_test_20260331_140151 --exact-classification-json E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\activity_token_span_classification_youi_leftbody_pairwise_rescore.json --cache-dir E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\continuous_feature_cache --checkpoint E:\99_docs_analysis\integration_workspace\artifacts_webcam9_relative_coord_v1\models\multibranch_baseline.pt --gesture-profile E:\99_docs_analysis\metadata\webcam9_gesture_profiles.json --output-json E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor\realtime_test_20260331_140151\like_i_serving_margin_analysis.json`
+- Artifacts:
+  - `reports/realtime_tests_smoke_poseanchor/realtime_test_20260331_133058/like_i_serving_margin_analysis.json`
+  - `reports/realtime_tests_smoke_poseanchor/realtime_test_20260331_140151/session_summary.json`
+  - `reports/realtime_tests_smoke_poseanchor/realtime_test_20260331_140151/trigger_segment_alignment.csv`
+  - `reports/realtime_tests_smoke_poseanchor/realtime_test_20260331_140151/like_i_serving_margin_analysis.json`
+  - `reports/realtime_tests_smoke_poseanchor/realtime_test_20260331_140151/like_i_serving_validation_summary.json`
+  - `reports/realtime_tests_smoke_poseanchor/realtime_test_20260331_140151/want_residual_probe.json`
+- Result:
+  - The `like-vs-i` analysis tightened to one implementable serving mismatch:
+    - main `like` segment baseline is `raw_label=i`, `raw_confidence=0.712878`, `top_margin=0.548098`
+    - exact-span `like` is already `raw_label=like`
+    - serving feature bridges all favor `like` over `i`
+    - dataset location prototype gap is negative (`-0.403229`), so the segment is already on the `like` side geometrically
+    - the minimum symmetric pairwise delta that still satisfies the current serving gate is `2.78`
+  - The serving rerun with that gated pairwise correction succeeds:
+    - segment 13 changes `i -> like`
+    - `decision_status` stays `trigger_emit`
+    - updated serving values are `raw_confidence=0.688079`, `top_margin=0.503404`
+  - Session-level impact improves again:
+    - emitted tokens change `you / mother / student / i -> you / mother / student / like`
+    - WER improves `0.625 -> 0.500`
+    - class coverage gains the missing `like` emit
+  - Existing accepted fixes stay intact:
+    - `you` remains `trigger_emit`
+    - `mother` remains `trigger_emit`
+    - `want` remains `student`
+- Improvement:
+  - Yes.
+  - This closes the `like-vs-i` serving line without threshold tuning.
+- Failed hypotheses:
+  - `like -> i` is mainly a broad serving-window mismatch.
+  - `like -> i` needs trigger fallback or threshold changes more than it needs a direct scorer correction.
+- Dominant mismatch learned:
+  - The dominant residual on this line was a subgroup-gated `like-vs-i` pairwise spacing bias, with the gate anchored by the location prototype gap already favoring `like`.
+- Mother fix stable:
+  - Yes.
+  - No regression observed.
+- You/i fix stable:
+  - Yes.
+  - No regression observed.
+- Next single mainline:
+  - Keep the accepted `mother`, `you/i`, `you-vs-like`, and `like-vs-i` fixes unchanged.
+  - Do not treat `want -> student` as a pure serving-only pair yet.
+  - The new probe shows exact-span `want` is already collapsing to `no_sign` with `student` only runner-up, so the next line must isolate the narrower `want` no-sign/student suppression structure before attempting any serving correction.
+
+## Round 21
+- Time:
+  - `2026-03-31 15:46:54 +08:00`
+- Mainline:
+  - Keep the accepted `mother`, `you/i`, `you-vs-like`, and `like-vs-i` fixes unchanged.
+  - Isolate whether `want -> no_sign` is a scorer defect or an anchor-specific reconstruction defect before attempting any `want` serving correction.
+- Hypothesis:
+  - The current `want` residual is not one pure `want-vs-student` serving pair.
+  - The exact-span `want -> no_sign` branch may be introduced specifically by `pose_local_anchor=torso_center`, while the serving trigger segment remains on a separate `student` line.
+- Modified files:
+  - `integration_workspace/scripts/analyze_want_anchor_suppression.py`
+  - `reports/continuous_inference_repair_progress.md`
+- Logic changed:
+  - Added a dedicated `want` analysis script that re-scores the same exact-span and serving target segment under the current accepted fixes for two pose anchors:
+    - `torso_center`
+    - `mid_shoulder`
+  - The script also records the minimum symmetric pairwise deltas and effective `no_sign` penalty factors needed to overturn the current top-1 for `want`.
+- Commands:
+  - `python -m py_compile integration_workspace/scripts/analyze_want_anchor_suppression.py`
+  - `python integration_workspace/scripts/analyze_want_anchor_suppression.py --current-session "E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor\realtime_test_20260331_140151" --exact-classification-json "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\activity_token_span_classification_youi_leftbody_pairwise_rescore.json" --cache-dir "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\continuous_feature_cache" --checkpoint "E:\99_docs_analysis\integration_workspace\artifacts_webcam9_relative_coord_v1\models\multibranch_baseline.pt" --gesture-profile "E:\99_docs_analysis\metadata\webcam9_gesture_profiles.json" --output-json "E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor\realtime_test_20260331_140151\want_anchor_suppression_analysis.json"`
+- Artifacts:
+  - `reports/realtime_tests_smoke_poseanchor/realtime_test_20260331_140151/want_anchor_suppression_analysis.json`
+- Result:
+  - `want_anchor_suppression_analysis.json` proves the current residual is a two-stage structure:
+    - `torso_center` exact-span: `want -> no_sign`
+      - top logits: `no_sign=4.277615`, `student=1.526295`, `want=0.011850`
+    - `mid_shoulder` exact-span: the same sampled span flips back to `want -> student`
+      - top logits: `student=6.230791`, `no_sign=1.018555`, `want=1.001766`
+    - serving target segment stays `student` under both anchors
+      - `torso_center`: `student=9.795578`, `want=0.792562`
+      - `mid_shoulder`: `student=13.210617`, `want=1.467625`
+  - The analysis also narrows which fix classes are not viable:
+    - global `no_sign` suppression is not viable
+      - exact-span `torso_center` would need `NOSIGN_PENALTY_FACTOR <= 0.063843` just to let `student` beat `no_sign`
+      - it would need `<= 0.014041` to let `want` beat `no_sign`
+    - scorer-only `want-vs-student` pairwise repair is not a near-margin fix
+      - exact-span `mid_shoulder` still needs about `5.229025` logit points for `want` to overtake `student`
+      - serving `mid_shoulder` needs about `11.742992` logit points
+- Improvement:
+  - No serving WER improvement in this round.
+  - The diagnosis improved materially:
+    - exact-span `want -> no_sign` is now localized to `torso_center` reconstruction rather than treated as a generic scorer collapse
+    - the remaining serving `want -> student` line is now quantified as too large for a casual pairwise tweak
+- Failed hypotheses:
+  - The current `want` residual can be treated as a pure serving-only `want-vs-student` pair.
+  - A global `no_sign` penalty is a plausible repair path for this line.
+- Dominant mismatch learned:
+  - `want` currently fails in two different stages:
+    - stage 1: `torso_center` injects an exact-span `no_sign` branch
+    - stage 2: after removing that branch with `mid_shoulder`, the serving line is still strongly `student`
+- Mother fix stable:
+  - Yes.
+- You/i fix stable:
+  - Yes.
+- You-vs-like fix stable:
+  - Yes.
+- Like-vs-i fix stable:
+  - Yes.
+- Next single mainline:
+  - Keep all accepted locked fixes unchanged.
+  - Do not reopen thresholds or global `no_sign` suppression.
+  - Test the smallest `want`-only anchor fallback that removes the `torso_center` exact-span `no_sign` branch:
+    - keep global `pose_local_anchor=torso_center`
+    - add a narrow `want` candidate fallback that re-scores with `mid_shoulder` only when the current path is on the `want/no_sign/student` suppression structure
+    - validate that this only improves the `want` line and does not regress the locked fixes.
+
+## Round 22
+- Time:
+  - `2026-03-31 15:58:35 +08:00`
+- Mainline:
+  - Keep all accepted locked fixes unchanged.
+  - Productize and validate the smallest `want`-only anchor fallback on the live trigger path.
+- Hypothesis:
+  - Even if the current serving `want` emit stays `student`, a very narrow `torso_center -> mid_shoulder` fallback may still hit the residual `want/no_sign/student` structure on one of the trigger segments and improve the live path without touching any locked fix.
+- Modified files:
+  - `integration_workspace/src/app/sign_sentence_engine.py`
+  - `integration_workspace/scripts/run_scripted_video_realtime_regression.py`
+  - `reports/continuous_inference_repair_progress.md`
+- Logic changed:
+  - Added an opt-in trigger-time `want` fallback behind runtime flags:
+    - `ENABLE_WANT_ANCHOR_FALLBACK`
+    - `WANT_ANCHOR_FALLBACK_MAX_NOSIGN_CONFIDENCE`
+  - The fallback is intentionally narrow:
+    - trigger mode only
+    - global anchor must still be `torso_center`
+    - segment must have both hands
+    - top-1 must be `no_sign`
+    - top-2 must be `student`
+    - `want` must still appear in top-3
+    - `no_sign` confidence must stay below a configurable cap
+  - When the gate fires, the scorer rebuilds the same trigger frames once with `mid_shoulder` and accepts the fallback only if the label leaves `no_sign` and confidence improves.
+  - Added fallback debug fields to trigger artifacts and session params.
+- Commands:
+  - `python -m py_compile integration_workspace/src/app/sign_sentence_engine.py integration_workspace/scripts/run_scripted_video_realtime_regression.py integration_workspace/scripts/analyze_want_anchor_suppression.py`
+  - `$env:POSE_LOCAL_ANCHOR='torso_center'; $env:ENABLE_MOTHER_NOSE_Z_CALIBRATION='1'; $env:MOTHER_NOSE_Z_OFFSET='-1.5'; $env:ENABLE_YOU_I_LEFTBODY_CALIBRATION='1'; $env:YOU_I_LEFTBODY_Y_OFFSET='-0.035'; $env:ENABLE_YOU_LIKE_PAIRWISE_CALIBRATION='1'; $env:YOU_LIKE_PAIRWISE_DELTA='0.98'; $env:ENABLE_LIKE_I_PAIRWISE_CALIBRATION='1'; $env:LIKE_I_PAIRWISE_DELTA='2.78'; $env:ENABLE_WANT_ANCHOR_FALLBACK='1'; $env:WANT_ANCHOR_FALLBACK_MAX_NOSIGN_CONFIDENCE='0.95'; python integration_workspace/scripts/run_scripted_video_realtime_regression.py --mode continuous --engine-mode trigger_based --video "E:\99_docs_analysis\i_you_mother_father_techer_sudent_want_like (1).mp4" --checkpoint "E:\99_docs_analysis\integration_workspace\artifacts_webcam9_relative_coord_v1\models\multibranch_baseline.pt" --gesture-profile "E:\99_docs_analysis\metadata\webcam9_gesture_profiles.json" --output-root "E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor" --sequence-length 30 --confidence-threshold 0.35 --mirror-input`
+- Artifacts:
+  - `reports/realtime_tests_smoke_poseanchor/realtime_test_20260331_155401/session_summary.json`
+  - `reports/realtime_tests_smoke_poseanchor/realtime_test_20260331_155401/trigger_segment_alignment.csv`
+  - `reports/realtime_tests_smoke_poseanchor/realtime_test_20260331_155401/session_params.json`
+- Result:
+  - Session-level serving outcome did not improve:
+    - WER stayed `0.500`
+    - emitted labels stayed effectively unchanged on the previously accepted lines:
+      - `you`
+      - `mother`
+      - `student`
+      - `like`
+    - the extra emitted `student` in this rerun is not new to the fallback line; the emitted `teacher -> student` segment already existed in the prior best-known session family.
+  - The new fallback debug fields show the hypothesis failed on the live `want` path:
+    - serving `want` emit segment (`segment_id=9`) stayed `student`
+    - `want_anchor_fallback_attempted=0`
+    - `want_anchor_fallback_applied=0`
+  - The residual `want -> no_sign` reject segment (`segment_id=10`) also did not match the fallback gate:
+    - top-3 was `no_sign / student / teacher`
+    - `want_anchor_fallback_attempted=0`
+    - `want_anchor_fallback_applied=0`
+  - Therefore the exact-span `torso_center -> no_sign` structure from Round 21 is not directly reachable on the current live trigger segments under the present segmentation.
+- Improvement:
+  - No.
+  - This was a failed live-path repair attempt, but it reduced uncertainty materially by proving the proposed fallback gate does not hit the actual serving `want` segments.
+- Failed hypotheses:
+  - A narrow live trigger fallback for the `torso_center` exact-span `want -> no_sign` branch will naturally activate on the current serving `want` segments.
+  - The current serving `want` residual can be repaired by mapping the exact-span `no_sign/student/want` structure directly onto trigger segments without first changing the trigger-local window itself.
+- Dominant mismatch learned:
+  - The exact-span `want -> no_sign` branch and the live trigger `want -> student` branch are now proven to be misaligned in segment shape:
+    - exact-span branch exists
+    - current trigger segments do not instantiate the same top-3 gate
+- Mother fix stable:
+  - Yes.
+- You/i fix stable:
+  - Yes.
+- You-vs-like fix stable:
+  - Yes.
+- Like-vs-i fix stable:
+  - Yes.
+- Next single mainline:
+  - Keep all accepted locked fixes unchanged.
+  - Abandon the current live `want` anchor-fallback gate.
+  - Move one level narrower on the same problem tree:
+    - sweep the serving `want` emit segment under alternate trigger-local windows and anchors
+    - determine whether any live resampling/windowing materially raises `want` over `student`
+    - if no such window exists, downgrade scorer/window-only repair paths for the live `want` line with evidence and move to the next remaining residual.
+
+## Round 23
+- Time:
+  - `2026-03-31 16:00:51 +08:00`
+- Mainline:
+  - Keep all accepted locked fixes unchanged.
+  - Determine whether the live serving `want` emit segment is recoverable by simple trigger-local windowing or anchor variation.
+- Hypothesis:
+  - If any reasonable anchor/window variant can materially raise `want` on the live serving segment, the next repair can stay local to trigger sampling.
+  - If every variant remains overwhelmingly `student`, then the live `want` line is not a near-window problem and should be downgraded out of the current repair family.
+- Modified files:
+  - `integration_workspace/scripts/analyze_want_serving_window_sweep.py`
+  - `reports/continuous_inference_repair_progress.md`
+- Logic changed:
+  - Added a dedicated serving-path sweep for the live `want` emit segment.
+  - The script re-scores the current best `want` trigger segment across:
+    - anchors: `torso_center`, `mid_shoulder`
+    - window variants: `uniform_full`, `uniform_head_75`, `uniform_tail_75`, `uniform_middle_75`, `first_30`, `middle_30`, `last_30`
+  - Each variant records `want` and `student` probabilities, logits, and the `want-minus-student` gap.
+- Commands:
+  - `python -m py_compile integration_workspace/scripts/analyze_want_serving_window_sweep.py`
+  - `python integration_workspace/scripts/analyze_want_serving_window_sweep.py --session-dir "E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor\realtime_test_20260331_155401" --cache-dir "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\continuous_feature_cache" --checkpoint "E:\99_docs_analysis\integration_workspace\artifacts_webcam9_relative_coord_v1\models\multibranch_baseline.pt" --gesture-profile "E:\99_docs_analysis\metadata\webcam9_gesture_profiles.json" --output-json "E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor\realtime_test_20260331_155401\want_serving_window_sweep.json"`
+- Artifacts:
+  - `reports/realtime_tests_smoke_poseanchor/realtime_test_20260331_155401/want_serving_window_sweep.json`
+- Result:
+  - No anchor/window variant comes remotely close to recovering `want`.
+  - Best observed variant is still `student`:
+    - anchor: `torso_center`
+    - variant: `uniform_tail_75`
+    - `want_probability = 0.000077`
+    - `student_probability = 0.999778`
+    - `want_minus_student_logit_gap = -9.475473`
+  - All other variants are similarly far from the decision boundary:
+    - `torso_center` variants stay roughly in the `-8.60` to `-10.85` logit-gap band
+    - `mid_shoulder` variants are even worse, roughly `-11.66` to `-13.97`
+  - Several variants do not place `want` in top-3 at all.
+- Improvement:
+  - No serving improvement.
+  - The remaining live `want` window/sampling line is now rigorously downgraded with evidence.
+- Failed hypotheses:
+  - The live `want` emit segment is a near-window problem.
+  - A simple anchor swap or trigger-local resampling can materially raise `want` over `student` on the current best serving segment.
+- Dominant mismatch learned:
+  - The current live `want` line is not recoverable by the same classes of narrow fixes that worked for `you-vs-like` and `like-vs-i`.
+  - At this point the evidence says:
+    - exact-span `want -> no_sign` is an anchor-specific reconstruction issue
+    - live serving `want -> student` is a much deeper class/domain collapse, not a margin or window defect
+- Mother fix stable:
+  - Yes.
+- You/i fix stable:
+  - Yes.
+- You-vs-like fix stable:
+  - Yes.
+- Like-vs-i fix stable:
+  - Yes.
+- Next single mainline:
+  - Keep all accepted locked fixes unchanged.
+  - Downgrade live `want` scorer/window-only repair paths on current evidence.
+  - Move to the next highest-value unresolved residual after `want`:
+    - verify whether `teacher/father -> no_sign/student` still has any narrow serving-side repair left under the accepted fix stack
+    - if not, rigorously downgrade those lines too and continue toward final end-to-end validation.
+
+## Round 24
+- Time:
+  - `2026-04-01 00:01:xx +08:00`
+- Mainline:
+  - Split `teacher` and `father` into separate exact-span vs serving residuals under the accepted locked fix stack.
+- Hypothesis:
+  - `father` may still have a narrow serving-side rescue path even though exact-span stays `no_sign`.
+  - `teacher` may not have a comparable narrow gate and must be analyzed separately before any fix attempt.
+- Modified files:
+  - `integration_workspace/scripts/analyze_teacher_father_residual.py`
+  - `reports/continuous_inference_repair_progress.md`
+- Logic changed:
+  - Added a dedicated residual-analysis script that reads:
+    - exact-span classification
+    - current serving `trigger_segment_alignment.csv`
+    - continuous feature cache
+  - The script quantifies, separately for `father` and `teacher`:
+    - exact-span top-3 outcome
+    - serving segment top-3 outcome
+    - father-location rule geometry hit ratio on the sampled frames
+    - simple counterfactual WER if only `father`, only `teacher`, or both were recovered
+- Commands:
+  - `python -m py_compile integration_workspace/scripts/analyze_teacher_father_residual.py`
+  - `python integration_workspace/scripts/analyze_teacher_father_residual.py --session-dir "E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor\realtime_test_20260331_155401" --exact-classification-json "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\activity_token_span_classification_youi_leftbody_pairwise_rescore.json" --cache-dir "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\continuous_feature_cache" --output-json "E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor\realtime_test_20260331_155401\teacher_father_residual_analysis.json"`
+- Artifacts:
+  - `reports/realtime_tests_smoke_poseanchor/realtime_test_20260331_155401/teacher_father_residual_analysis.json`
+- Result:
+  - `father` and `teacher` are now explicitly separated rather than treated as one residual:
+    - `father` exact-span: `no_sign`
+    - `father` serving:
+      - segment `4`: `no_sign`, top-3 `no_sign / like / i`, father geometry hit ratio `0.0`
+      - segment `6`: `no_sign`, top-3 `no_sign / father / i`, father geometry hit ratio `0.818182`
+    - `teacher` exact-span: `no_sign`
+    - `teacher` serving:
+      - segment `7`: `student`, top-3 `student / want / no_sign`, no `teacher` gate and father-geometry hit ratio `0.0`
+  - Counterfactual WER confirms both lines are still valuable, but only `father` exposes a narrow live gate:
+    - baseline WER `0.500`
+    - `father-only` recovery: `0.375`
+    - `teacher-only` recovery: `0.375`
+    - `father+teacher` recovery: `0.250`
+- Improvement:
+  - No serving WER change in this diagnosis round.
+  - Residual isolation improved materially.
+- Failed hypotheses:
+  - `teacher` and `father` can be handled as the same residual.
+  - `teacher` currently exposes a comparably narrow live serving gate to `father`.
+- Dominant mismatch learned:
+  - `father` has one narrow trigger-side rescue candidate on serving segment `6`.
+  - `teacher` remains split:
+    - exact-span already `no_sign`
+    - live serving emit is still a separate `student` branch
+- Mother fix stable:
+  - Yes.
+- You/i fix stable:
+  - Yes.
+- You-vs-like fix stable:
+  - Yes.
+- Like-vs-i fix stable:
+  - Yes.
+- Next single mainline:
+  - Keep all locked fixes unchanged.
+  - Apply exactly one minimal `father`-only trigger rescue on the live `no_sign / father` segment shape.
+
+## Round 25
+- Time:
+  - `2026-04-01 00:11:xx +08:00`
+- Mainline:
+  - Land the smallest `father`-only trigger rescue and validate it against the accepted fix stack.
+- Hypothesis:
+  - A trigger-only rescue can recover `father` without touching the locked `mother`, `you/i`, `you-vs-like`, or `like-vs-i` fixes if and only if:
+    - top-1 is `no_sign`
+    - top-2 is `father`
+    - the sampled frames show strong `father` face-relative geometry
+- Modified files:
+  - `integration_workspace/src/app/sign_sentence_engine.py`
+  - `integration_workspace/scripts/run_scripted_video_realtime_regression.py`
+  - `integration_workspace/run_sentence_interface.py`
+  - `reports/continuous_inference_repair_progress.md`
+- Logic changed:
+  - Added a new opt-in trigger rescue behind runtime flags:
+    - `ENABLE_FATHER_TRIGGER_RESCUE`
+    - `FATHER_TRIGGER_RESCUE_PAIRWISE_DELTA`
+    - `FATHER_TRIGGER_RESCUE_MIN_RATIO`
+    - `FATHER_TRIGGER_RESCUE_MAX_NOSIGN_CONFIDENCE`
+  - The rescue is intentionally narrow:
+    - trigger mode only
+    - global anchor must remain `torso_center`
+    - current top-1 must be `no_sign`
+    - current top-2 must be `father`
+    - `no_sign` confidence must remain below a configurable cap
+    - sampled frames must meet a minimum father-geometry hit ratio
+  - When the gate fires, the scorer applies a symmetric `father` vs `no_sign` pairwise delta and only keeps the rescue if the updated result actually satisfies the existing emit confidence and top-margin gates.
+  - Added full debug fields for the rescue to trigger artifacts and session params.
+- Commands:
+  - `python -m py_compile integration_workspace/src/app/sign_sentence_engine.py integration_workspace/scripts/run_scripted_video_realtime_regression.py integration_workspace/run_sentence_interface.py integration_workspace/scripts/analyze_teacher_father_residual.py`
+  - `$env:POSE_LOCAL_ANCHOR='torso_center'; $env:ENABLE_MOTHER_NOSE_Z_CALIBRATION='1'; $env:MOTHER_NOSE_Z_OFFSET='-1.5'; $env:ENABLE_YOU_I_LEFTBODY_CALIBRATION='1'; $env:YOU_I_LEFTBODY_Y_OFFSET='-0.035'; $env:ENABLE_YOU_LIKE_PAIRWISE_CALIBRATION='1'; $env:YOU_LIKE_PAIRWISE_DELTA='0.98'; $env:ENABLE_LIKE_I_PAIRWISE_CALIBRATION='1'; $env:LIKE_I_PAIRWISE_DELTA='2.78'; $env:ENABLE_WANT_ANCHOR_FALLBACK='1'; $env:WANT_ANCHOR_FALLBACK_MAX_NOSIGN_CONFIDENCE='0.95'; $env:ENABLE_FATHER_TRIGGER_RESCUE='1'; $env:FATHER_TRIGGER_RESCUE_PAIRWISE_DELTA='6.5'; $env:FATHER_TRIGGER_RESCUE_MIN_RATIO='0.75'; $env:FATHER_TRIGGER_RESCUE_MAX_NOSIGN_CONFIDENCE='0.995'; python integration_workspace/scripts/run_scripted_video_realtime_regression.py --mode continuous --engine-mode trigger_based --video "E:\99_docs_analysis\i_you_mother_father_techer_sudent_want_like (1).mp4" --checkpoint "E:\99_docs_analysis\integration_workspace\artifacts_webcam9_relative_coord_v1\models\multibranch_baseline.pt" --gesture-profile "E:\99_docs_analysis\metadata\webcam9_gesture_profiles.json" --output-root "E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor" --sequence-length 30 --confidence-threshold 0.35 --mirror-input`
+  - `python integration_workspace/scripts/analyze_teacher_father_residual.py --session-dir "E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor\realtime_test_20260401_001138" --exact-classification-json "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\activity_token_span_classification_youi_leftbody_pairwise_rescore.json" --cache-dir "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\continuous_feature_cache" --output-json "E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor\realtime_test_20260401_001138\teacher_father_residual_analysis.json"`
+- Artifacts:
+  - `reports/realtime_tests_smoke_poseanchor/realtime_test_20260401_001138/session_summary.json`
+  - `reports/realtime_tests_smoke_poseanchor/realtime_test_20260401_001138/trigger_segment_alignment.csv`
+  - `reports/realtime_tests_smoke_poseanchor/realtime_test_20260401_001138/teacher_father_residual_analysis.json`
+- Result:
+  - The rescue hits exactly the intended serving line:
+    - segment `6` changes `no_sign -> father`
+    - rescue debug is now recorded in artifacts:
+      - `father_trigger_rescue_attempted = 1`
+      - `father_trigger_rescue_applied = 1`
+      - `father_trigger_rescue_hit_ratio = 0.818182`
+      - `father_trigger_rescue_pairwise_delta = 6.5`
+    - segment `4` remains rejected and untouched:
+      - `top-2` is still not `father`
+      - geometry ratio remains `0.0`
+    - `teacher` remains unchanged on its own line:
+      - segment `7` still emits `student`
+  - Session-level impact improves materially:
+    - predicted tokens: `you / mother / father / student / student / like`
+    - WER improves `0.500 -> 0.375`
+  - Locked fixes remain stable:
+    - `you` still emits
+    - `mother` still emits
+    - `like` still emits
+    - `want` line is unchanged (`student` / `no_sign`)
+- Improvement:
+  - Yes.
+  - This is a serving improvement with evidence and no observed regression on the locked fixes.
+- Failed hypotheses:
+  - `father` needs a broad threshold change or segmentation rewrite before any serving recovery is possible.
+  - `father` must be solved together with `teacher`.
+- Dominant mismatch learned:
+  - The surviving `father` line was not one monolithic exact-span collapse.
+  - One serving segment already contained recoverable `father` structure; it only needed a very narrow `no_sign/father` scorer correction under a strong geometry gate.
+- Mother fix stable:
+  - Yes.
+- You/i fix stable:
+  - Yes.
+- You-vs-like fix stable:
+  - Yes.
+- Like-vs-i fix stable:
+  - Yes.
+- Next single mainline:
+  - Keep the new `father` rescue locked.
+  - Re-evaluate `teacher -> no_sign/student` only; do not reopen `father`.
+
+## Round 26
+- Time:
+  - `2026-04-01 00:17:xx +08:00`
+- Mainline:
+  - Determine whether `teacher` still has any narrow window/anchor repair path left after the `father` rescue is locked.
+- Hypothesis:
+  - If any exact-span or serving-local teacher window can raise `teacher` to top-1, a narrow trigger/window repair may still be viable.
+  - If every reasonable variant remains overwhelmingly `no_sign` or `student`, narrow window-only teacher repair paths should be downgraded.
+- Modified files:
+  - `integration_workspace/scripts/analyze_teacher_serving_window_sweep.py`
+  - `reports/continuous_inference_repair_progress.md`
+- Logic changed:
+  - Added a dedicated teacher sweep over:
+    - windows:
+      - exact full teacher span
+      - current serving emit segment
+      - following reject segment
+      - merged emit+following window
+    - variants:
+      - `uniform_full`
+      - `first_30`
+      - `middle_30`
+      - `last_30`
+    - anchors:
+      - `torso_center`
+      - `mid_shoulder`
+  - Each variant records:
+    - top-3 labels
+    - `teacher`, `student`, and `no_sign` probabilities
+    - `teacher-minus-student` and `teacher-minus-no_sign` logit gaps
+- Commands:
+  - `python -m py_compile integration_workspace/scripts/analyze_teacher_serving_window_sweep.py`
+  - `python integration_workspace/scripts/analyze_teacher_serving_window_sweep.py --session-dir "E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor\realtime_test_20260401_001138" --exact-classification-json "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\activity_token_span_classification_youi_leftbody_pairwise_rescore.json" --cache-dir "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\continuous_feature_cache" --output-json "E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor\realtime_test_20260401_001138\teacher_serving_window_sweep.json"`
+- Artifacts:
+  - `reports/realtime_tests_smoke_poseanchor/realtime_test_20260401_001138/teacher_serving_window_sweep.json`
+- Result:
+  - `teacher_top1_variant_count = 0`.
+  - No tested teacher window becomes `teacher` under either anchor.
+  - The best observed teacher variant is still far from recovery:
+    - window: `teacher_exact_full`
+    - variant: `first_30`
+    - anchor: `torso_center`
+    - `predicted_label = no_sign`
+    - `teacher_probability = 0.000197`
+    - `teacher_minus_no_sign_logit_gap = -8.531674`
+  - The current live emit segment remains strongly wrong:
+    - serving emit window `669-680`
+    - `torso_center`: still `no_sign`, not `teacher`
+    - `mid_shoulder`: still `student`, not `teacher`
+- Improvement:
+  - No serving improvement.
+  - The teacher window/anchor-only path is now rigorously downgraded with evidence.
+- Failed hypotheses:
+  - `teacher` is mainly a trigger-local window problem.
+  - A simple anchor swap or merged local window can recover `teacher`.
+- Dominant mismatch learned:
+  - `teacher` no longer looks like the same repair class as `father`.
+  - The current evidence says:
+    - exact-span `teacher` is already deeply `no_sign`
+    - the live serving `student` emit is not recoverable by a narrow window/anchor change
+- Mother fix stable:
+  - Yes.
+- You/i fix stable:
+  - Yes.
+- You-vs-like fix stable:
+  - Yes.
+- Like-vs-i fix stable:
+  - Yes.
+- Father rescue stable:
+  - Yes.
+- Next single mainline:
+  - Keep the locked `father` rescue and all earlier locked fixes unchanged.
+  - Downgrade narrow teacher window/anchor repair paths on current evidence.
+  - Move to the next highest-value unresolved residual after:
+    - `want` narrow live-window paths downgraded
+    - `teacher` narrow live-window paths downgraded
+  - Immediate next check:
+    - run final end-to-end validation summary on the current best-known stack
+    - then identify whether any remaining unresolved serving residual outranks a broader `teacher` / `want` model-domain investigation.
+
+## Round 27
+- Time:
+  - `2026-04-01 00:22:45 +08:00`
+- Mainline:
+  - Build a machine-readable final validation summary for the current best-known stack and rank the remaining unresolved residuals.
+- Hypothesis:
+  - After `father` is locked and narrow `teacher` / `want` window paths are downgraded, the next single mainline can be selected directly from current evidence without reopening old branches.
+- Modified files:
+  - `integration_workspace/scripts/build_best_known_stack_summary.py`
+  - `reports/continuous_inference_repair_progress.md`
+- Logic changed:
+  - Added a summary script that consolidates:
+    - baseline serving session
+    - current best serving session
+    - exact-span classifications
+    - `teacher/father` residual analysis
+    - `teacher` narrow-window sweep
+    - `want` narrow-window sweep
+  - The script outputs:
+    - current best-known stack parameters
+    - locked-fix presence checks
+    - residual priority ordering
+    - the next single recommended mainline
+- Commands:
+  - `python -m py_compile integration_workspace/scripts/build_best_known_stack_summary.py`
+  - `python integration_workspace/scripts/build_best_known_stack_summary.py --baseline-session-dir "E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor\realtime_test_20260331_155401" --best-session-dir "E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor\realtime_test_20260401_001138" --exact-classification-json "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\activity_token_span_classification_youi_leftbody_pairwise_rescore.json" --teacher-father-analysis-json "E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor\realtime_test_20260401_001138\teacher_father_residual_analysis.json" --teacher-sweep-json "E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor\realtime_test_20260401_001138\teacher_serving_window_sweep.json" --want-sweep-json "E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor\realtime_test_20260331_155401\want_serving_window_sweep.json" --output-json "E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor\realtime_test_20260401_001138\best_known_stack_summary.json"`
+- Artifacts:
+  - `reports/realtime_tests_smoke_poseanchor/realtime_test_20260401_001138/best_known_stack_summary.json`
+- Result:
+  - The current best-known stack is now frozen in one artifact:
+    - baseline WER `0.500`
+    - best-known WER `0.375`
+    - delta `0.125`
+  - Locked fix presence checks remain positive:
+    - `you`
+    - `mother`
+    - `father`
+    - `like`
+  - Residual ordering is now explicit:
+    - `want` priority score `213`
+    - `teacher` priority score `92`
+    - `i` priority score `15`
+  - The next single mainline is no longer ambiguous:
+    - `want -> broader_model_domain_investigation`
+- Improvement:
+  - No serving WER change.
+  - Residual ranking and final-stack evidence improved materially.
+- Failed hypotheses:
+  - A remaining unresolved serving residual outranks `want` once `father` is locked and narrow `teacher` repair paths are downgraded.
+  - `i` should be reopened before the broader `want` / `teacher` branch on current serving evidence.
+- Dominant mismatch learned:
+  - `want` is now the highest-value unresolved residual because:
+    - exact-span already falls to `no_sign`
+    - live serving still emits `student` and rejects `no_sign`
+    - the narrow anchor/window path is already ruled out
+- Mother fix stable:
+  - Yes.
+- You/i fix stable:
+  - Yes.
+- You-vs-like fix stable:
+  - Yes.
+- Like-vs-i fix stable:
+  - Yes.
+- Father rescue stable:
+  - Yes.
+- Next single mainline:
+  - Keep the best-known stack unchanged.
+  - Run one same-stack stability rerun before shifting into the broader `want` residual branch.
+
+## Round 28
+- Time:
+  - `2026-04-01 00:27:03 +08:00`
+- Mainline:
+  - Validate that the current best-known stack reproduces on a fresh smoke rerun before opening the broader `want` branch.
+- Hypothesis:
+  - If the locked stack is real rather than accidental, a same-parameter rerun should reproduce:
+    - `father` emit
+    - `teacher -> student`
+    - `want -> student/no_sign`
+    - WER `0.375`
+- Modified files:
+  - `reports/continuous_inference_repair_progress.md`
+- Logic changed:
+  - No code change.
+  - Stability was validated by rerunning the current locked stack, then generating session-specific summary artifacts.
+- Commands:
+  - `$env:POSE_LOCAL_ANCHOR='torso_center'; $env:ENABLE_MOTHER_NOSE_Z_CALIBRATION='1'; $env:MOTHER_NOSE_Z_OFFSET='-1.5'; $env:ENABLE_YOU_I_LEFTBODY_CALIBRATION='1'; $env:YOU_I_LEFTBODY_Y_OFFSET='-0.035'; $env:ENABLE_YOU_LIKE_PAIRWISE_CALIBRATION='1'; $env:YOU_LIKE_PAIRWISE_DELTA='0.98'; $env:ENABLE_LIKE_I_PAIRWISE_CALIBRATION='1'; $env:LIKE_I_PAIRWISE_DELTA='2.78'; $env:ENABLE_WANT_ANCHOR_FALLBACK='1'; $env:WANT_ANCHOR_FALLBACK_MAX_NOSIGN_CONFIDENCE='0.95'; $env:ENABLE_FATHER_TRIGGER_RESCUE='1'; $env:FATHER_TRIGGER_RESCUE_PAIRWISE_DELTA='6.5'; $env:FATHER_TRIGGER_RESCUE_MIN_RATIO='0.75'; $env:FATHER_TRIGGER_RESCUE_MAX_NOSIGN_CONFIDENCE='0.995'; python integration_workspace/scripts/run_scripted_video_realtime_regression.py --mode continuous --engine-mode trigger_based --video "E:\99_docs_analysis\i_you_mother_father_techer_sudent_want_like (1).mp4" --checkpoint "E:\99_docs_analysis\integration_workspace\artifacts_webcam9_relative_coord_v1\models\multibranch_baseline.pt" --gesture-profile "E:\99_docs_analysis\metadata\webcam9_gesture_profiles.json" --output-root "E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor" --sequence-length 30 --confidence-threshold 0.35 --mirror-input`
+  - `python integration_workspace/scripts/analyze_teacher_father_residual.py --session-dir "E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor\realtime_test_20260401_002302" --exact-classification-json "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\activity_token_span_classification_youi_leftbody_pairwise_rescore.json" --cache-dir "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\continuous_feature_cache" --output-json "E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor\realtime_test_20260401_002302\teacher_father_residual_analysis.json"`
+  - `python integration_workspace/scripts/build_best_known_stack_summary.py --baseline-session-dir "E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor\realtime_test_20260331_155401" --best-session-dir "E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor\realtime_test_20260401_002302" --exact-classification-json "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\activity_token_span_classification_youi_leftbody_pairwise_rescore.json" --teacher-father-analysis-json "E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor\realtime_test_20260401_002302\teacher_father_residual_analysis.json" --teacher-sweep-json "E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor\realtime_test_20260401_001138\teacher_serving_window_sweep.json" --want-sweep-json "E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor\realtime_test_20260331_155401\want_serving_window_sweep.json" --output-json "E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor\realtime_test_20260401_002302\best_known_stack_summary.json"`
+- Artifacts:
+  - `reports/realtime_tests_smoke_poseanchor/realtime_test_20260401_002302/session_summary.json`
+  - `reports/realtime_tests_smoke_poseanchor/realtime_test_20260401_002302/trigger_segment_alignment.csv`
+  - `reports/realtime_tests_smoke_poseanchor/realtime_test_20260401_002302/teacher_father_residual_analysis.json`
+  - `reports/realtime_tests_smoke_poseanchor/realtime_test_20260401_002302/best_known_stack_summary.json`
+- Result:
+  - The stack reproduces exactly on a fresh rerun:
+    - predicted tokens: `you / mother / father / student / student / like`
+    - WER `0.375`
+  - `father` rescue re-fires on the same narrow line:
+    - segment `6`
+    - `father_trigger_rescue_attempted = 1`
+    - `father_trigger_rescue_applied = 1`
+    - `father_trigger_rescue_hit_ratio = 0.818182`
+  - Remaining residuals also reproduce unchanged:
+    - `teacher -> student`
+    - `want -> student`
+    - `want -> no_sign`
+  - The session-specific summary still ranks:
+    - `want` above `teacher`
+    - `teacher` above `i`
+- Improvement:
+  - No WER gain over the prior best-known session.
+  - Stability evidence improved materially because the stack reproduced on a fresh session.
+- Failed hypotheses:
+  - The current `father` improvement was a one-off session artifact.
+  - A fresh rerun would reshuffle residual priority away from `want`.
+- Operational issue:
+  - A first attempt to build the new session summary was launched in parallel with its prerequisite `teacher_father_residual_analysis.json` and failed on missing-file ordering.
+  - Re-running the summary sequentially succeeded with no model/regression change.
+- Mother fix stable:
+  - Yes.
+- You/i fix stable:
+  - Yes.
+- You-vs-like fix stable:
+  - Yes.
+- Like-vs-i fix stable:
+  - Yes.
+- Father rescue stable:
+  - Yes.
+- Next single mainline:
+  - Keep all locked fixes and the locked `father` rescue unchanged.
+  - Move into the next highest-value unresolved residual:
+    - broader `want -> no_sign/student` investigation
+  - First task on that branch:
+    - isolate the smallest model-domain or feature-domain counterfactual that can raise exact-span `want` above `no_sign` without reopening the locked fixes.
+
+## Round 29
+- Time:
+  - `2026-04-01 00:31:19 +08:00`
+- Mainline:
+  - Re-open the broader `want` branch on the fresh stable session and isolate the smallest exact-span feature-domain counterfactual behind `want -> no_sign`.
+- Hypothesis:
+  - The exact-span `want -> no_sign` failure may already be explainable by one narrow feature group rather than a full anchor or full-location rewrite.
+- Modified files:
+  - `integration_workspace/scripts/analyze_want_feature_group_counterfactual.py`
+  - `reports/continuous_inference_repair_progress.md`
+- Logic changed:
+  - Added a dedicated exact-span counterfactual script for `want`.
+  - The script compares:
+    - `mid_shoulder` base exact span
+    - `torso_center` base exact span
+    - bidirectional group swaps for:
+      - `pose_coords_only`
+      - `skeleton_all`
+      - `location_all`
+      - `motion_all`
+- Commands:
+  - `python integration_workspace/scripts/analyze_want_anchor_suppression.py --current-session "E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor\realtime_test_20260401_002302" --exact-classification-json "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\activity_token_span_classification_youi_leftbody_pairwise_rescore.json" --cache-dir "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\continuous_feature_cache" --checkpoint "E:\99_docs_analysis\integration_workspace\artifacts_webcam9_relative_coord_v1\models\multibranch_baseline.pt" --gesture-profile "E:\99_docs_analysis\metadata\webcam9_gesture_profiles.json" --output-json "E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor\realtime_test_20260401_002302\want_anchor_suppression.json"`
+  - `python -m py_compile integration_workspace/scripts/analyze_want_feature_group_counterfactual.py`
+  - `python integration_workspace/scripts/analyze_want_feature_group_counterfactual.py --exact-classification-json "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\activity_token_span_classification_youi_leftbody_pairwise_rescore.json" --cache-dir "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\continuous_feature_cache" --checkpoint "E:\99_docs_analysis\integration_workspace\artifacts_webcam9_relative_coord_v1\models\multibranch_baseline.pt" --gesture-profile "E:\99_docs_analysis\metadata\webcam9_gesture_profiles.json" --output-json "E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor\realtime_test_20260401_002302\want_feature_group_counterfactual.json"`
+- Artifacts:
+  - `reports/realtime_tests_smoke_poseanchor/realtime_test_20260401_002302/want_anchor_suppression.json`
+  - `reports/realtime_tests_smoke_poseanchor/realtime_test_20260401_002302/want_feature_group_counterfactual.json`
+- Result:
+  - The fresh stable session reproduces the same two-stage `want` structure:
+    - exact-span `torso_center`: `want -> no_sign`
+    - exact-span `mid_shoulder`: `want -> student`
+    - serving emit segment still remains strongly `student`
+  - The smallest exact-span counterfactual is now explicit:
+    - `smallest_counterfactual_group = pose_coords_only`
+    - swapping only `mid_shoulder` pose coordinates into the `torso_center` exact span fully reproduces the `student` result
+    - swapping only `torso_center` pose coordinates into `mid_shoulder` fully reproduces the `no_sign` result
+  - Other broad groups are not the minimal culprit:
+    - `location_all` does not transfer the label flip
+    - `motion_all` does not transfer the label flip
+- Improvement:
+  - No serving WER change.
+  - The broader `want` branch narrowed materially from “anchor-specific” to one concrete culprit:
+    - pose-local pose coordinates
+- Failed hypotheses:
+  - `want -> no_sign` needs a full location-vector rewrite before any exact-span explanation is possible.
+  - Motion features are the dominant cause of the exact-span `want` suppression.
+- Dominant mismatch learned:
+  - The exact-span `want -> no_sign` branch is driven by `pose_coords_only`.
+  - The remaining gap to true `want` is still a second issue because the corrected exact span becomes `student`, not `want`.
+- Mother fix stable:
+  - Yes.
+- You/i fix stable:
+  - Yes.
+- You-vs-like fix stable:
+  - Yes.
+- Like-vs-i fix stable:
+  - Yes.
+- Father rescue stable:
+  - Yes.
+- Next single mainline:
+  - Keep all locked fixes unchanged.
+  - Test whether the same `pose_coords_only` counterfactual can rescue the live `want` reject segment at all.
+
+## Round 30
+- Time:
+  - `2026-04-01 00:32:34 +08:00`
+- Mainline:
+  - Determine whether the live `want` reject segment can be recovered by the same `pose_coords_only` counterfactual that explains the exact-span branch.
+- Hypothesis:
+  - If `segment_id=10` responds to `mid_shoulder` pose-coordinate substitution, there may still be one narrow live rescue path on the `want` reject line.
+- Modified files:
+  - `integration_workspace/scripts/analyze_want_segment_pose_counterfactual.py`
+  - `reports/continuous_inference_repair_progress.md`
+- Logic changed:
+  - Added a trigger-segment counterfactual script that scores a specific segment under:
+    - `torso_center`
+    - `mid_shoulder`
+    - `torso_center` with only `mid_shoulder` pose coordinates swapped in
+- Commands:
+  - `python -m py_compile integration_workspace/scripts/analyze_want_segment_pose_counterfactual.py`
+  - `python integration_workspace/scripts/analyze_want_segment_pose_counterfactual.py --session-dir "E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor\realtime_test_20260401_002302" --cache-dir "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\continuous_feature_cache" --checkpoint "E:\99_docs_analysis\integration_workspace\artifacts_webcam9_relative_coord_v1\models\multibranch_baseline.pt" --gesture-profile "E:\99_docs_analysis\metadata\webcam9_gesture_profiles.json" --segment-id 10 --output-json "E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor\realtime_test_20260401_002302\want_segment10_pose_counterfactual.json"`
+- Artifacts:
+  - `reports/realtime_tests_smoke_poseanchor/realtime_test_20260401_002302/want_segment10_pose_counterfactual.json`
+- Result:
+  - The live reject segment does respond to the pose-coordinate swap, but not in the useful direction:
+    - `torso_center`: `no_sign`
+    - `mid_shoulder`: `student`
+    - `torso_with_mid_pose_coords_only`: `student`
+  - `want` remains absent even from top candidates on this segment.
+  - Therefore the local live counterfactual is not a `want` recovery path; it only shifts the reject line from `no_sign` into a stronger `student`.
+- Improvement:
+  - No.
+  - This rules out the last obvious narrow live rescue path for the `want` reject segment.
+- Failed hypotheses:
+  - The exact-span `pose_coords_only` culprit naturally extends into a useful live `want` rescue.
+  - `segment_id=10` can be repaired by a small pose-coordinate substitution without addressing `student` dominance.
+- Dominant mismatch learned:
+  - The broader `want` branch is now split cleanly:
+    - exact-span `no_sign` is a pose-coordinate reconstruction defect
+    - live serving remains a separate `student` representation problem
+- Mother fix stable:
+  - Yes.
+- You/i fix stable:
+  - Yes.
+- You-vs-like fix stable:
+  - Yes.
+- Like-vs-i fix stable:
+  - Yes.
+- Father rescue stable:
+  - Yes.
+- Next single mainline:
+  - Keep all locked fixes unchanged.
+  - Stop pursuing narrow live `want` rescue paths.
+  - Move one level broader:
+    - identify whether the surviving `want` representation is closer to `student` or `no_sign` in the feature-group prototype space.
+
+## Round 31
+- Time:
+  - `2026-04-01 00:33:03 +08:00`
+- Mainline:
+  - Quantify the broader `want` representation drift in prototype/feature-group space.
+- Hypothesis:
+  - If `want` is still most displaced on pose-context groups while location groups remain secondary, the next repair family should stay on representation/reconstruction rather than global scorer or threshold edits.
+- Modified files:
+  - `reports/continuous_inference_repair_progress.md`
+- Logic changed:
+  - No code change.
+  - Ran the existing per-span prototype-distance statistics against the current working cache and exact-span classifications.
+- Commands:
+  - `python integration_workspace/scripts/build_span_feature_group_statistics.py --spans-json "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\activity_token_span_hypothesis.json" --classification-json "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\activity_token_span_classification_youi_leftbody_pairwise_rescore.json" --cache-dir "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\continuous_feature_cache" --output-json "E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor\realtime_test_20260401_002302\span_feature_group_statistics.json"`
+- Artifacts:
+  - `reports/realtime_tests_smoke_poseanchor/realtime_test_20260401_002302/span_feature_group_statistics.json`
+- Result:
+  - The `want` row remains predicted as `no_sign`.
+  - In the current prototype-distance breakdown, `want` shows the only positive `reference_minus_attractor_l2` on:
+    - `pose_context_graph = 0.113739`
+  - The same metric is negative on:
+    - `location_vectors = -0.560574`
+    - `motion_core = -0.056395`
+    - `pose_location_contextual = -0.080592`
+  - This matches the earlier counterfactual result:
+    - the dominant exact-span displacement remains in pose-context / pose-coordinate structure rather than location or motion.
+- Improvement:
+  - No serving WER change.
+  - The broader `want` branch now has convergent evidence from:
+    - anchor analysis
+    - feature-group counterfactuals
+    - prototype-distance statistics
+- Failed hypotheses:
+  - `location_vectors` are the dominant current `want` attractor.
+  - The next-best branch should return to local serving heuristics before addressing representation drift.
+- Dominant mismatch learned:
+  - The broader `want` residual is now best described as:
+    - exact-span pose-context reconstruction defect first
+    - student-dominant serving representation second
+- Mother fix stable:
+  - Yes.
+- You/i fix stable:
+  - Yes.
+- You-vs-like fix stable:
+  - Yes.
+- Like-vs-i fix stable:
+  - Yes.
+- Father rescue stable:
+  - Yes.
+- Next single mainline:
+  - Keep all locked fixes unchanged.
+  - Move to the next minimal high-value experiment on the broader `want` branch:
+    - test whether a very narrow exact-span `want` pose-context reconstruction override can lift `want` above `student` without affecting non-`want` tokens
+    - if it cannot, downgrade heuristic inference fixes on `want` entirely and mark the remaining branch as training/data-domain work.
+
+## Round 32
+- Time:
+  - `2026-04-03 13:13:15 +08:00`
+- Mainline:
+  - `want` broader representation / reconstruction branch
+  - Run one very narrow exact-span `want` pose-context reconstruction override before deciding whether to downgrade inference-side heuristics on `want`.
+- Hypothesis:
+  - If replacing only the exact-span `want` pose-context / pose-coordinate structure with true training-side `want` prototypes can lift `want` above `student`, there is still one narrow reconstruction path worth keeping on the inference side.
+  - If even that prototype-backed override still leaves `student` on top, the remaining `want` gap should be downgraded to training/data-domain rather than patched with more serving heuristics.
+- Modified files:
+  - `integration_workspace/scripts/analyze_want_pose_context_reconstruction.py`
+  - `reports/continuous_inference_repair_progress.md`
+- Logic changed:
+  - Added a dedicated exact-span reconstruction diagnostic for `want`.
+  - The script keeps the locked serving stack unchanged and scores:
+    - `torso_center` base exact span
+    - `mid_shoulder` base exact span
+    - `torso_center` with only `mid_shoulder` `pose_coords_only`
+    - `torso_center` with `want` training prototype overrides on:
+      - `pose_coords_only`
+      - `pose_context_graph`
+    - multiple `alpha` blends plus per-sample `want` prototype full overrides
+  - Added a control score using the `student` prototype mean on the same narrow groups.
+- Commands:
+  - `python -m py_compile integration_workspace/scripts/analyze_want_pose_context_reconstruction.py`
+  - `python integration_workspace/scripts/analyze_want_pose_context_reconstruction.py --exact-classification-json "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\activity_token_span_classification_youi_leftbody_pairwise_rescore.json" --cache-dir "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\continuous_feature_cache" --prototype-stats-json "E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor\realtime_test_20260401_002302\span_feature_group_statistics.json" --checkpoint "E:\99_docs_analysis\integration_workspace\artifacts_webcam9_relative_coord_v1\models\multibranch_baseline.pt" --gesture-profile "E:\99_docs_analysis\metadata\webcam9_gesture_profiles.json" --output-json "E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor\realtime_test_20260401_002302\want_pose_context_reconstruction.json"`
+- Artifacts:
+  - `reports/realtime_tests_smoke_poseanchor/realtime_test_20260401_002302/want_pose_context_reconstruction.json`
+- Result:
+  - `want_recovered = false`
+  - Best narrow override is:
+    - `torso_with_want_sample_05_pose_coords_only_a100`
+    - predicted label `student`
+    - `want_probability = 0.063594`
+    - `student_probability = 0.934685`
+    - `want_minus_student_logit_gap = -2.687689`
+  - This does improve `want` materially versus the current exact-span base:
+    - base `want_probability = 0.012967`
+    - best prototype-backed override `want_probability = 0.063594`
+  - But even a full training-side `want` pose-context override cannot pull `want` above `student`.
+  - The `want` prototype mean override is also still `student`:
+    - `torso_with_want_mean_pose_context_graph_a100`
+    - `want_probability = 0.026129`
+    - `student_probability = 0.972860`
+  - The control `student` prototype mean remains strongly `student`, so the override path is functioning as intended; it just does not recover `want`.
+- Improvement:
+  - No serving WER improvement.
+  - The broader `want` line is now resolved more decisively: even prototype-backed narrow reconstruction stays below `student`.
+- Failed hypotheses:
+  - A very narrow exact-span `want` pose-context reconstruction override is sufficient to recover `want`.
+  - The remaining `want` residual should still be treated as an inference-side heuristic problem.
+- Dominant mismatch learned:
+  - `want` exact-span suppression has a reconstructible pose-context component, but the best narrow reconstruction still lands inside the `student` basin.
+  - The unresolved `want` branch is therefore downgraded from inference-side heuristic work to `training/data-domain`.
+- Mother fix stable:
+  - Yes.
+- You/i fix stable:
+  - Yes.
+- You-vs-like fix stable:
+  - Yes.
+- Like-vs-i fix stable:
+  - Yes.
+- Father rescue stable:
+  - Yes.
+- Next single mainline:
+  - Keep the locked best-known stack unchanged.
+  - Treat `want` as an acknowledged training/data-domain residual.
+  - Move to the next highest-value serving residual:
+    - `teacher -> no_sign/student`
+  - First task on that branch:
+    - determine whether any equally narrow exact-span `teacher` pose-context reconstruction can raise `teacher` above `no_sign`; if not, downgrade `teacher` inference heuristics as well and preserve the current best-known stack.
+
+## Round 33
+- Time:
+  - `2026-04-03 13:16:45 +08:00`
+- Mainline:
+  - `teacher -> no_sign/student`
+  - Test the smallest exact-span `teacher` pose-context reconstruction override before considering any serving-side heuristic.
+- Hypothesis:
+  - If `teacher` training prototypes can lift the exact-span `teacher` window above `no_sign` using only `pose_coords_only` / `pose_context_graph`, there is still one narrow reconstruction branch worth keeping.
+  - If the best prototype-backed override still remains `no_sign`, `teacher` should be downgraded to training/data-domain just like `want`.
+- Modified files:
+  - `integration_workspace/scripts/analyze_token_pose_context_reconstruction.py`
+  - `reports/continuous_inference_repair_progress.md`
+- Logic changed:
+  - Added a token-generic exact-span pose-context reconstruction diagnostic.
+  - The script keeps the locked serving stack unchanged and scores:
+    - `torso_center` base exact span
+    - `mid_shoulder` base exact span
+    - `torso_center` with only `mid_shoulder` `pose_coords_only`
+    - target-token prototype mean overrides on:
+      - `pose_coords_only`
+      - `pose_context_graph`
+    - alpha blends plus per-sample full overrides
+    - an optional control-label mean override
+- Commands:
+  - `python -m py_compile integration_workspace/scripts/analyze_token_pose_context_reconstruction.py`
+  - `python integration_workspace/scripts/analyze_token_pose_context_reconstruction.py --exact-classification-json "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\activity_token_span_classification_youi_leftbody_pairwise_rescore.json" --cache-dir "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\continuous_feature_cache" --prototype-stats-json "E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor\realtime_test_20260401_002302\span_feature_group_statistics.json" --checkpoint "E:\99_docs_analysis\integration_workspace\artifacts_webcam9_relative_coord_v1\models\multibranch_baseline.pt" --gesture-profile "E:\99_docs_analysis\metadata\webcam9_gesture_profiles.json" --token teacher --control-label student --output-json "E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor\realtime_test_20260401_002302\teacher_pose_context_reconstruction.json"`
+- Artifacts:
+  - `reports/realtime_tests_smoke_poseanchor/realtime_test_20260401_002302/teacher_pose_context_reconstruction.json`
+- Result:
+  - `target_recovered = false`
+  - Best narrow override is:
+    - `torso_with_teacher_sample_02_pose_coords_only_a100`
+    - predicted label `no_sign`
+    - `teacher_probability = 0.019171`
+    - `no_sign_probability = 0.974681`
+    - `teacher_minus_nosign_logit_gap = -3.928711`
+  - This is a large improvement over the current exact-span base:
+    - base `teacher_probability = 0.000100`
+    - best prototype-backed override `teacher_probability = 0.019171`
+  - But even the best prototype-backed pose-context override still cannot lift `teacher` above `no_sign`.
+  - The teacher prototype mean override also remains `no_sign`:
+    - `torso_with_teacher_mean_pose_context_graph_a100`
+    - `teacher_probability = 0.007428`
+    - `no_sign_probability = 0.992340`
+  - Existing anchor/window evidence remains unchanged:
+    - no sweep variant produces `teacher` top-1
+    - serving emit is still `student`
+- Improvement:
+  - No serving WER improvement.
+  - The `teacher` branch is now resolved more decisively: prototype-backed narrow reconstruction still stays inside the `no_sign` basin.
+- Failed hypotheses:
+  - A narrow exact-span `teacher` pose-context reconstruction can recover `teacher`.
+  - `teacher` should remain an inference-side heuristic mainline after the current exact-span and serving evidence.
+- Dominant mismatch learned:
+  - `teacher` has a reconstructible exact-span pose-context component, but not enough to beat `no_sign`.
+  - The remaining `teacher` residual is therefore downgraded to `training/data-domain`, not a serving-side heuristic fix.
+- Mother fix stable:
+  - Yes.
+- You/i fix stable:
+  - Yes.
+- You-vs-like fix stable:
+  - Yes.
+- Like-vs-i fix stable:
+  - Yes.
+- Father rescue stable:
+  - Yes.
+- Next single mainline:
+  - Keep the locked best-known stack unchanged.
+  - `want` and `teacher` are both now acknowledged `training/data-domain` residuals.
+  - Move to final overall validation on the locked serving stack and consolidate:
+    - latest trigger smoke rerun
+    - exact-span / serving parity evidence
+    - session summary
+    - trigger segment alignment
+    - emitted tokens / WER
+    - all locked-fix and downgraded-residual conclusions in one artifact
+
+## Round 34
+- Time:
+  - `2026-04-03 13:26:04 +08:00`
+- Mainline:
+  - Final overall validation on the locked best-known serving stack.
+- Hypothesis:
+  - If the locked stack is still stable after the latest smoke rerun, the serving path should reproduce:
+    - emitted tokens `you / mother / father / student / student / like`
+    - `WER 0.375`
+    - `father` rescue on segment `6`
+  - The remaining `want` / `teacher` gaps should stay classified as training/data-domain in the consolidated validation artifact.
+- Modified files:
+  - `integration_workspace/scripts/build_final_validation_summary.py`
+  - `reports/continuous_inference_repair_progress.md`
+- Logic changed:
+  - Added a final validation summary builder that consolidates:
+    - latest `session_summary.json`
+    - latest `trigger_segment_alignment.csv`
+    - locked stack parameters
+    - exact-span parity
+    - locked-fix validation
+    - downgraded `want` / `teacher` reconstruction evidence
+    - residual-priority state after downgrade
+- Commands:
+  - `$env:POSE_LOCAL_ANCHOR='torso_center'; $env:ENABLE_MOTHER_NOSE_Z_CALIBRATION='1'; $env:MOTHER_NOSE_Z_OFFSET='-1.5'; $env:ENABLE_YOU_I_LEFTBODY_CALIBRATION='1'; $env:YOU_I_LEFTBODY_Y_OFFSET='-0.035'; $env:ENABLE_YOU_LIKE_PAIRWISE_CALIBRATION='1'; $env:YOU_LIKE_PAIRWISE_DELTA='0.98'; $env:ENABLE_LIKE_I_PAIRWISE_CALIBRATION='1'; $env:LIKE_I_PAIRWISE_DELTA='2.78'; $env:ENABLE_WANT_ANCHOR_FALLBACK='1'; $env:WANT_ANCHOR_FALLBACK_MAX_NOSIGN_CONFIDENCE='0.95'; $env:ENABLE_FATHER_TRIGGER_RESCUE='1'; $env:FATHER_TRIGGER_RESCUE_PAIRWISE_DELTA='6.5'; $env:FATHER_TRIGGER_RESCUE_MIN_RATIO='0.75'; $env:FATHER_TRIGGER_RESCUE_MAX_NOSIGN_CONFIDENCE='0.995'; python integration_workspace/scripts/run_scripted_video_realtime_regression.py --mode continuous --engine-mode trigger_based --video "E:\99_docs_analysis\i_you_mother_father_techer_sudent_want_like (1).mp4" --checkpoint "E:\99_docs_analysis\integration_workspace\artifacts_webcam9_relative_coord_v1\models\multibranch_baseline.pt" --gesture-profile "E:\99_docs_analysis\metadata\webcam9_gesture_profiles.json" --output-root "E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor" --sequence-length 30 --confidence-threshold 0.35 --mirror-input`
+  - `python integration_workspace/scripts/analyze_teacher_father_residual.py --session-dir "E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor\realtime_test_20260403_131747" --exact-classification-json "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\activity_token_span_classification_youi_leftbody_pairwise_rescore.json" --cache-dir "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\continuous_feature_cache" --output-json "E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor\realtime_test_20260403_131747\teacher_father_residual_analysis.json"`
+  - `python integration_workspace/scripts/build_best_known_stack_summary.py --baseline-session-dir "E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor\realtime_test_20260331_155401" --best-session-dir "E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor\realtime_test_20260403_131747" --exact-classification-json "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\activity_token_span_classification_youi_leftbody_pairwise_rescore.json" --teacher-father-analysis-json "E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor\realtime_test_20260403_131747\teacher_father_residual_analysis.json" --teacher-sweep-json "E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor\realtime_test_20260401_001138\teacher_serving_window_sweep.json" --want-sweep-json "E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor\realtime_test_20260331_155401\want_serving_window_sweep.json" --output-json "E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor\realtime_test_20260403_131747\best_known_stack_summary.json"`
+  - `python -m py_compile integration_workspace/scripts/build_final_validation_summary.py`
+  - `python integration_workspace/scripts/build_final_validation_summary.py --session-dir "E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor\realtime_test_20260403_131747" --exact-classification-json "E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\activity_token_span_classification_youi_leftbody_pairwise_rescore.json" --best-known-stack-json "E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor\realtime_test_20260403_131747\best_known_stack_summary.json" --want-reconstruction-json "E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor\realtime_test_20260401_002302\want_pose_context_reconstruction.json" --teacher-reconstruction-json "E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor\realtime_test_20260401_002302\teacher_pose_context_reconstruction.json" --output-json "E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor\realtime_test_20260403_131747\final_validation_summary.json"`
+- Artifacts:
+  - `reports/realtime_tests_smoke_poseanchor/realtime_test_20260403_131747/session_summary.json`
+  - `reports/realtime_tests_smoke_poseanchor/realtime_test_20260403_131747/trigger_segment_alignment.csv`
+  - `reports/realtime_tests_smoke_poseanchor/realtime_test_20260403_131747/teacher_father_residual_analysis.json`
+  - `reports/realtime_tests_smoke_poseanchor/realtime_test_20260403_131747/best_known_stack_summary.json`
+  - `reports/realtime_tests_smoke_poseanchor/realtime_test_20260403_131747/final_validation_summary.json`
+- Result:
+  - Latest locked-stack rerun fully reproduces the best-known serving session:
+    - predicted tokens `you / mother / father / student / student / like`
+    - `WER 0.375`
+    - `frame_count = 1344`
+    - `trigger_segment_count = 11`
+  - Locked fixes remain stable:
+    - `mother_present = true`
+    - `you_present = true`
+    - `like_present = true`
+    - `father_present = true`
+  - `father` rescue remains stable on the latest rerun:
+    - emitted `father` on segment `6`
+    - alignment still shows `father -> father`
+  - Consolidated final validation summary now records:
+    - exact-span accuracy `0.375`
+    - emitted alignment per segment
+    - locked stack parameters
+    - `want` downgraded to `training/data-domain`
+    - `teacher` downgraded to `training/data-domain`
+    - `higher_priority_serving_residual_remaining = false`
+- Improvement:
+  - No WER gain beyond the locked best-known stack.
+  - Final validation evidence is now complete and up to date on a fresh rerun.
+- Operational note:
+  - The first attempt to build `final_validation_summary.json` was launched in parallel with its prerequisite `best_known_stack_summary.json` and failed on file ordering.
+  - Re-running the final summary sequentially succeeded with no change to model behavior.
+- Failed hypotheses:
+  - The locked stack no longer reproduces on a fresh rerun.
+  - A higher-priority unresolved serving residual remains after downgrading `want` and `teacher`.
+- Dominant mismatch learned:
+  - The serving path is now stable at the best-known stack.
+  - Remaining `want` / `teacher` errors are documented as training/data-domain, not unresolved inference-side heuristics.
+- Mother fix stable:
+  - Yes.
+- You/i fix stable:
+  - Yes.
+- You-vs-like fix stable:
+  - Yes.
+- Like-vs-i fix stable:
+  - Yes.
+- Father rescue stable:
+  - Yes.
+- Next single mainline:
+  - None. The high-priority serving queue has been exhausted and the final validation artifact is in place.
+
+## Round 35
+- Time:
+  - `2026-04-03 13:28:34 +08:00`
+- Mainline:
+  - Re-read latest artifacts and verify whether any post-validation higher-priority serving residual reopened.
+- Hypothesis:
+  - If no artifact newer than the 2026-04-03 final validation rerun contradicts the downgraded `want` / `teacher` conclusions, the previous stop-condition check remains valid.
+- Modified files:
+  - `reports/continuous_inference_repair_progress.md`
+- Logic changed:
+  - No code change.
+  - Re-read:
+    - `reports/realtime_tests_smoke_poseanchor/realtime_test_20260403_131747/final_validation_summary.json`
+    - `reports/realtime_tests_smoke_poseanchor/realtime_test_20260403_131747/best_known_stack_summary.json`
+    - latest poseanchor / smoke artifact directories
+  - Explicitly resolved the apparent mismatch between:
+    - older residual-order wording in `best_known_stack_summary.json`
+    - newer downgraded-residual state in `final_validation_summary.json`
+- Commands:
+  - `Get-Content -Raw reports/realtime_tests_smoke_poseanchor/realtime_test_20260403_131747/final_validation_summary.json`
+  - `Get-Content -Raw reports/realtime_tests_smoke_poseanchor/realtime_test_20260403_131747/best_known_stack_summary.json`
+  - `Get-ChildItem -Directory reports/realtime_tests_smoke_poseanchor | Sort-Object LastWriteTime -Descending | Select-Object -First 3 FullName,LastWriteTime | Format-Table -AutoSize`
+  - `Get-ChildItem -Directory reports/realtime_tests_smoke | Sort-Object LastWriteTime -Descending | Select-Object -First 3 FullName,LastWriteTime | Format-Table -AutoSize`
+- Artifacts read:
+  - `reports/realtime_tests_smoke_poseanchor/realtime_test_20260403_131747/final_validation_summary.json`
+  - `reports/realtime_tests_smoke_poseanchor/realtime_test_20260403_131747/best_known_stack_summary.json`
+- Result:
+  - No newer rerun supersedes `realtime_test_20260403_131747`.
+  - `final_validation_summary.json` remains the latest authoritative artifact for stop-condition evaluation.
+  - The residual-order block in `best_known_stack_summary.json` is older framing and is superseded by the newer final-validation state:
+    - `want -> training/data-domain`
+    - `teacher -> training/data-domain`
+    - `higher_priority_serving_residual_remaining = false`
+  - No new high-priority serving residual has reopened after the 2026-04-03 final validation rerun.
+- Improvement:
+  - No serving WER change.
+  - Evidence consistency improved by resolving the stale-summary ambiguity in the log.
+- Failed hypotheses:
+  - A newer artifact has reopened `want` as the active highest-priority serving mainline.
+  - The 2026-04-03 final validation is stale or contradicted by later evidence.
+- Next single mainline:
+  - None. Latest evidence still shows no unhandled higher-priority serving residual after final validation.
+
+## Round 36
+- Time:
+  - `2026-04-03 13:48:30 +08:00`
+- Mainline:
+  - `want` exact-span `pose_context_graph` single-vector reconstruction override.
+- Hypothesis:
+  - If the live exact-span `want -> no_sign` defect is recoverable by a very narrow inference-side reconstruction, then blending only the torso-centered `pose_context_graph` with a known `want` prototype context vector at `alpha=0.4` should move the exact-span output toward `want` without touching any other feature group.
+- Modified files:
+  - `integration_workspace/scripts/analyze_want_pose_context_reconstruction.py`
+  - `reports/continuous_inference_repair_progress.md`
+- Logic changed:
+  - Added a narrow mode to `analyze_want_pose_context_reconstruction.py`:
+    - `--single-vector-replacement`
+    - `--single-group`
+    - `--single-alpha`
+  - The narrow mode blends a single prototype vector across all 30 sampled frames instead of replacing the full sequence.
+  - This round used only:
+    - `group = pose_context_graph`
+    - `alpha = 0.4`
+    - target window = exact-span `want`
+    - prototype source = mean `want` torso-centered context vector
+- Commands:
+  - `python -m py_compile E:\99_docs_analysis\integration_workspace\scripts\analyze_want_pose_context_reconstruction.py`
+  - `python -m py_compile E:\99_docs_analysis\integration_workspace\scripts\analyze_want_serving_window_sweep.py`
+  - `python E:\99_docs_analysis\integration_workspace\scripts\analyze_want_pose_context_reconstruction.py --exact-classification-json E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\activity_token_span_classification_youi_leftbody_pairwise_rescore.json --cache-dir E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\continuous_feature_cache --prototype-stats-json E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor\realtime_test_20260401_002302\span_feature_group_statistics.json --checkpoint E:\99_docs_analysis\integration_workspace\artifacts_webcam9_relative_coord_v1\models\multibranch_baseline.pt --gesture-profile E:\99_docs_analysis\metadata\webcam9_gesture_profiles.json --single-vector-replacement --single-group pose_context_graph --single-alpha 0.4 --output-json E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor\realtime_test_20260403_131747\want_pose_context_vector_override.json`
+  - `python E:\99_docs_analysis\integration_workspace\scripts\analyze_want_serving_window_sweep.py --session-dir E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor\realtime_test_20260403_131747 --cache-dir E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\continuous_feature_cache --checkpoint E:\99_docs_analysis\integration_workspace\artifacts_webcam9_relative_coord_v1\models\multibranch_baseline.pt --gesture-profile E:\99_docs_analysis\metadata\webcam9_gesture_profiles.json --output-json E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor\realtime_test_20260403_131747\want_serving_window_sweep_rerun.json`
+- Artifacts:
+  - `reports/realtime_tests_smoke_poseanchor/realtime_test_20260403_131747/want_pose_context_vector_override.json`
+  - `reports/realtime_tests_smoke_poseanchor/realtime_test_20260403_131747/want_serving_window_sweep_rerun.json`
+- Result:
+  - Exact-span base remained:
+    - `torso_center_base -> no_sign`
+    - `want_probability = 0.012967`
+    - `student_probability = 0.058959`
+  - Narrow override result:
+    - `torso_with_want_single_vector_pose_context_graph_a040 -> student`
+    - `want_probability = 0.006982`
+    - `student_probability = 0.988986`
+    - `want_minus_student_logit_gap = -4.953389`
+  - Serving scorer log on the main live `want` emit segment (`segment_id = 9`) still shows no bridge:
+    - best variant = `torso_center / uniform_tail_75`
+    - `raw_label = student`
+    - `want_probability = 0.000077`
+    - `student_probability = 0.999778`
+    - `want_minus_student_logit_gap = -9.475473`
+- Improvement:
+  - No.
+  - The narrow exact-span override did not recover `want` and did not create a serving-side bridge.
+- Failed hypotheses:
+  - A single torso-centered `pose_context_graph` prototype vector at moderate gate strength can pull exact-span `want` over `student` or at least over the previous `no_sign` failure mode.
+- Conclusion:
+  - This exact hypothesis is falsified.
+  - `want` remains downgraded to `training/data-domain`, not a viable inference-side heuristic fix.
+- Next single mainline:
+  - Split `teacher` and `father` separately on exact-span first, classify each as exact-span suppression vs serving mismatch, then choose only the higher-impact residual for the next minimal narrow correction.
+
+## Round 37
+- Time:
+  - `2026-04-03 13:54:00 +08:00`
+- Mainline:
+  - Split `teacher/father -> no_sign/student` and run one minimal correction experiment on the single chosen residual.
+- Hypothesis:
+  - If `father` is still a serving scorer mismatch, it should expose a clean pairwise-spacing candidate on the remaining rejected segment.
+  - If `teacher` is the cleaner unresolved residual, then the narrow next cut is exact-span `pose_context_graph` reconstruction on the teacher window, not a serving pairwise fix.
+- Modified files:
+  - `integration_workspace/scripts/analyze_teacher_father_residual.py`
+  - `integration_workspace/scripts/analyze_token_pose_context_reconstruction.py`
+  - `reports/continuous_inference_repair_progress.md`
+- Logic changed:
+  - Added explicit residual-type classification to the teacher/father split-analysis artifact.
+  - Added `chosen_single_residual_for_next_experiment` so the artifact records which token/type is actually worth the next narrow cut.
+  - Added narrow single-vector override mode to the generic token pose-context reconstruction script:
+    - `--single-vector-replacement`
+    - `--single-group`
+    - `--single-alpha`
+  - This round used that narrow mode only for:
+    - token = `teacher`
+    - group = `pose_context_graph`
+    - alpha = `0.4`
+    - replacement = single mean teacher torso-centered prototype context vector
+- Commands:
+  - `python -m py_compile E:\99_docs_analysis\integration_workspace\scripts\analyze_teacher_father_residual.py`
+  - `python -m py_compile E:\99_docs_analysis\integration_workspace\scripts\analyze_token_pose_context_reconstruction.py`
+  - `python -m py_compile E:\99_docs_analysis\integration_workspace\scripts\analyze_teacher_serving_window_sweep.py`
+  - `python E:\99_docs_analysis\integration_workspace\scripts\analyze_teacher_father_residual.py --session-dir E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor\realtime_test_20260403_131747 --exact-classification-json E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\activity_token_span_classification_youi_leftbody_pairwise_rescore.json --cache-dir E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\continuous_feature_cache --output-json E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor\realtime_test_20260403_131747\teacher_father_split_experiment.json`
+  - `python E:\99_docs_analysis\integration_workspace\scripts\analyze_token_pose_context_reconstruction.py --exact-classification-json E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\activity_token_span_classification_youi_leftbody_pairwise_rescore.json --cache-dir E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\continuous_feature_cache --prototype-stats-json E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor\realtime_test_20260401_002302\span_feature_group_statistics.json --checkpoint E:\99_docs_analysis\integration_workspace\artifacts_webcam9_relative_coord_v1\models\multibranch_baseline.pt --gesture-profile E:\99_docs_analysis\metadata\webcam9_gesture_profiles.json --token teacher --control-label student --single-vector-replacement --single-group pose_context_graph --single-alpha 0.4 --output-json E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor\realtime_test_20260403_131747\teacher_pose_context_vector_override.json`
+  - `python E:\99_docs_analysis\integration_workspace\scripts\analyze_teacher_serving_window_sweep.py --session-dir E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor\realtime_test_20260403_131747 --exact-classification-json E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\activity_token_span_classification_youi_leftbody_pairwise_rescore.json --cache-dir E:\99_docs_analysis\reports\realtime_tests_smoke\realtime_test_20260331_023211\continuous_feature_cache --checkpoint E:\99_docs_analysis\integration_workspace\artifacts_webcam9_relative_coord_v1\models\multibranch_baseline.pt --output-json E:\99_docs_analysis\reports\realtime_tests_smoke_poseanchor\realtime_test_20260403_131747\teacher_serving_window_sweep_rerun.json`
+- Artifacts:
+  - `reports/realtime_tests_smoke_poseanchor/realtime_test_20260403_131747/teacher_father_split_experiment.json`
+  - `reports/realtime_tests_smoke_poseanchor/realtime_test_20260403_131747/teacher_pose_context_vector_override.json`
+  - `reports/realtime_tests_smoke_poseanchor/realtime_test_20260403_131747/teacher_serving_window_sweep_rerun.json`
+- Result:
+  - Split analysis:
+    - `father -> mixed_residual`
+      - exact-span remains `no_sign`
+      - serving is already split into one rejected `no_sign` segment and one emitted `father` segment
+      - the remaining rejected father segment is not a clean pairwise-spacing candidate:
+        - top3 = `no_sign / like / i`
+        - `father_rule_geometry.hit_ratio = 0.0`
+    - `teacher -> mixed_residual`
+      - exact-span remains deeply `no_sign`
+      - serving has no `teacher` top-1 bridge and no serving-only scorer rescue
+    - chosen single residual for the narrow experiment:
+      - `teacher`
+  - Narrow exact-span teacher override:
+    - base = `no_sign`
+    - override = `torso_with_teacher_single_vector_pose_context_graph_a040 -> no_sign`
+    - `teacher_probability: 0.000100 -> 0.000127`
+    - `teacher_minus_nosign_logit_gap: -9.214399 -> -8.972229`
+  - Teacher serving scorer log:
+    - `teacher_top1_variant_count = 0`
+    - best teacher-oriented window remains `no_sign`
+    - best `teacher_probability = 0.000197`
+    - best `teacher_minus_nosign_logit_gap = -8.531674`
+- Improvement:
+  - No.
+  - This narrow teacher correction did not recover exact-span `teacher` and did not produce any serving bridge.
+- Failed hypotheses:
+  - The remaining `father` miss is primarily a clean pairwise-spacing serving mismatch.
+  - A single-vector torso-centered `teacher` `pose_context_graph` override at moderate gate strength can recover teacher or open a serving bridge.
+- Conclusion:
+  - `father` is not currently a narrow pairwise-spacing candidate.
+  - `teacher` remains dominated by upstream exact-span suppression and still does not yield to a narrow inference-side `pose_context_graph` override.
+- Next single mainline:
+  - Re-rank remaining unresolved residuals after downgrading the narrow `teacher/father` cuts attempted here, then move to the next unresolved serving residual with a still-viable narrow path.
+
+## Round 38
+- Time:
+  - `2026-04-03 14:02:00 +08:00`
+- Mainline:
+  - Close out inference-side residual repair and switch to final runnable webcam pipeline assembly.
+- Hypothesis:
+  - `want`, `teacher`, and `father` no longer have viable narrow inference-side fixes on current evidence, so the next highest-value task is to package the locked best-known serving stack into a direct webcam entrypoint.
+- Modified files:
+  - `reports/continuous_inference_repair_progress.md`
+- Logic changed:
+  - No model/scorer logic change.
+  - Explicitly downgraded:
+    - `want -> training/data-domain`
+    - `teacher -> training/data-domain`
+    - `father residual branch -> training/data-domain`
+  - Locked stack remains:
+    - `pose_local_anchor=torso_center`
+    - `mother` fix
+    - `you/i` fix
+    - `you-vs-like` fix
+    - `like-vs-i` fix
+    - `father rescue`
+- Result:
+  - Current best-known serving stack remains the executable target.
+  - Residual repair work is now closed on the inference side; remaining misses are documented as training/data-domain limitations.
+- Current limitations:
+  - `want`, `teacher`, and the remaining non-rescued `father` branch remain training/data-domain residuals.
+  - Best reproducible serving WER remains approximately `0.375`.
+- Next single mainline:
+  - Build and verify `python realtime_webcam_sign_lang.py` as a direct webcam runner using the locked best-known stack.
+
+## Round 39
+- Time:
+  - `2026-04-03 14:15:00 +08:00`
+- Mainline:
+  - Final runnable webcam pipeline assembly and verification.
+- Modified files:
+  - `realtime_webcam_sign_lang.py`
+  - `reports/continuous_inference_repair_progress.md`
+- Logic changed:
+  - Added a direct root-level webcam entrypoint:
+    - `python realtime_webcam_sign_lang.py`
+  - The script reuses the existing serving path:
+    - OpenCV capture
+    - MediaPipe holistic landmarks via `HolisticExtractor`
+    - `build_frame_feature`
+    - `MultibranchSequenceEngine(mode="trigger_based")`
+    - locked best-known stack fixes and parameters
+    - emit/reject display and JSON summary output
+  - Added built-in headless simulation fallback for verification:
+    - `SIGN_SIMULATION_MODE=1`
+    - `SIGN_HEADLESS=1`
+    - optional `SIGN_MAX_FRAMES`
+  - Added required comment block:
+    - `Current limitations: want/teacher/father remain training/data-domain residuals (WER ~0.375)`
+- Commands:
+  - `python -m py_compile E:\99_docs_analysis\realtime_webcam_sign_lang.py`
+  - `SIGN_SIMULATION_MODE=1 SIGN_HEADLESS=1 SIGN_MAX_FRAMES=220 python E:\99_docs_analysis\realtime_webcam_sign_lang.py`
+  - `SIGN_SIMULATION_MODE=1 SIGN_HEADLESS=1 SIGN_MAX_FRAMES=420 python E:\99_docs_analysis\realtime_webcam_sign_lang.py`
+  - `SIGN_SIMULATION_MODE=1 SIGN_HEADLESS=1 python E:\99_docs_analysis\realtime_webcam_sign_lang.py`
+- Artifacts:
+  - `realtime_webcam_sign_lang.py`
+  - `reports/realtime_webcam_runner_last_summary.json`
+- Result:
+  - The final script is directly executable with no CLI args.
+  - Full simulation verification completed end-to-end:
+    - source = bundled sample video fallback
+    - frames processed = `1344`
+    - emit path exercised with emitted tokens:
+      - `father`
+      - `student`
+      - `student`
+      - `i`
+    - summary written to:
+      - `reports/realtime_webcam_runner_last_summary.json`
+- Improvement:
+  - The project now has a single runnable webcam entrypoint built on the current serving stack.
+- Remaining limitations:
+  - `want`, `teacher`, and the remaining `father` residual branch stay downgraded to training/data-domain.
+  - Current simulation output remains below the historical best-known emitted sequence and should not be interpreted as a new inference-side fix path.
+
+## Round 40
+- Time:
+  - `2026-04-03 14:42:00 +08:00`
+- Mainline:
+  - Build a minimal dataset rebuild path for `want / teacher / father` only.
+- Hypothesis:
+  - Since `want`, `teacher`, and the remaining `father` misses are now training/data-domain residuals, the highest-value next step is a direct webcam collection + incremental retrain script that augments only these three labels without rebuilding the full dataset.
+- Modified files:
+  - `collect_want_teacher_father.py`
+  - `reports/continuous_inference_repair_progress.md`
+- Logic changed:
+  - Added a root-level incremental data collection script:
+    - records webcam clips for `want`, `teacher`, `father`
+    - keeps `pose_local_anchor=torso_center`
+    - syncs only these new clips into `datasets/training_variants/webcam_9_with_nosign_raw`
+    - updates `source_metadata.csv`
+    - reruns `scan_video_dataset.py`
+    - reruns `extract_landmarks_batch.py` with `--class-filter want teacher father --skip-existing`
+    - reruns `export_sequences_batch.py` with `--class-filter want teacher father --skip-existing`
+    - rebuilds full `sequence_manifest.csv` from `index.jsonl`
+    - rebuilds splits
+    - runs `train_multibranch.py`
+- Commands:
+  - `python -m py_compile E:\99_docs_analysis\collect_want_teacher_father.py`
+  - `python E:\99_docs_analysis\collect_want_teacher_father.py --help`
+- Artifacts:
+  - `collect_want_teacher_father.py`
+- Result:
+  - The project now has a single executable path for collecting new `want / teacher / father` webcam data and feeding it into the existing training pipeline without a full dataset rebuild.
+  - User-facing Chinese instructions are embedded directly in the script docstring and runtime console output.
+- Improvement:
+  - Yes.
+  - The residual repair effort is now connected to a concrete data-domain remediation path.
+- Failed hypotheses:
+  - None in this round.
+- Next single mainline:
+  - Run `collect_want_teacher_father.py` with live webcam data, then retrain and re-evaluate the real-time serving path against the updated checkpoint.

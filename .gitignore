@@ -1,0 +1,43 @@
+# Local media and heavyweight generated assets
+local_assets/
+datasets/raw/00_videos/
+datasets/sentences/00_sentence_videos_50/
+datasets/sentences/00_sentence_word_segments_*/
+datasets/recorded/
+datasets/training_variants/**/videos/
+datasets/training_variants/**/clips/
+datasets/training_variants/**/segments/
+
+# Root-level ad hoc captures
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.webm
+
+# Model weights and tensor artifacts
+*.pt
+*.pth
+*.onnx
+*.ckpt
+*.npz
+*.npy
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Workspace outputs
+integration_workspace/artifacts*/
+integration_workspace/data/
+integration_workspace/dataset_pipeline/
+integration_workspace/dataset_pipeline_*/
+integration_workspace/**/__pycache__/
+reports/realtime_tests/
+reports/realtime_tests_smoke/
+reports/realtime_tests_smoke_poseanchor/
+reports/trigger_param_search/
+
+# Editor and OS noise
+.DS_Store
+Thumbs.db

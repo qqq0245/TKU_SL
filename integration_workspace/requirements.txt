@@ -1,0 +1,5 @@
+numpy>=1.26,<3
+opencv-python>=4.9,<5
+mediapipe>=0.10,<0.11
+torch>=2.2,<3
+tqdm>=4.66,<5

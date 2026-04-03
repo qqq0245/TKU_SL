@@ -1,0 +1,24 @@
+{
+  "source": "camera:0",
+  "used_simulation": false,
+  "mirror_input": true,
+  "frames_processed": 1635,
+  "duration_seconds": 61.872,
+  "avg_fps": 26.426,
+  "emitted_tokens": [
+    "i",
+    "you",
+    "i",
+    "i",
+    "i"
+  ],
+  "locked_stack": {
+    "pose_local_anchor": "torso_center",
+    "mother_fix": true,
+    "you_i_fix": true,
+    "you_vs_like_fix": true,
+    "like_vs_i_fix": true,
+    "father_rescue": true
+  },
+  "limitations": "want/teacher/father remain training/data-domain residuals (WER ~0.375)"
+}

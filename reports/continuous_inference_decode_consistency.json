@@ -1,0 +1,185 @@
+{
+  "video_path": "C:\\Users\\qqq02\\Desktop\\99_docs_analysis\\i_you_mother_father_techer_sudent_want_like (1).mp4",
+  "opencv_version": "4.13.0",
+  "sequential_results": [
+    {
+      "backend": "default",
+      "opened": true,
+      "property_frame_count": 1344,
+      "fps": 59.73383480256378,
+      "readable_frames": 1344,
+      "backend_label": "default"
+    },
+    {
+      "backend": "1900",
+      "opened": true,
+      "property_frame_count": 1344,
+      "fps": 59.73383480256378,
+      "readable_frames": 1344,
+      "backend_label": "CAP_FFMPEG"
+    },
+    {
+      "backend": "1400",
+      "opened": true,
+      "property_frame_count": -1,
+      "fps": 59.73394500893023,
+      "readable_frames": 0,
+      "backend_label": "CAP_MSMF"
+    }
+  ],
+  "random_access_results": [
+    {
+      "backend": "default",
+      "opened": true,
+      "checks": [
+        {
+          "frame_index": 0,
+          "success": true
+        },
+        {
+          "frame_index": 1,
+          "success": true
+        },
+        {
+          "frame_index": 2,
+          "success": true
+        },
+        {
+          "frame_index": 100,
+          "success": true
+        },
+        {
+          "frame_index": 500,
+          "success": true
+        },
+        {
+          "frame_index": 1000,
+          "success": true
+        },
+        {
+          "frame_index": 1023,
+          "success": true
+        },
+        {
+          "frame_index": 1024,
+          "success": true
+        },
+        {
+          "frame_index": 1100,
+          "success": true
+        },
+        {
+          "frame_index": 1200,
+          "success": true
+        },
+        {
+          "frame_index": 1300,
+          "success": true
+        }
+      ],
+      "backend_label": "default"
+    },
+    {
+      "backend": "1900",
+      "opened": true,
+      "checks": [
+        {
+          "frame_index": 0,
+          "success": true
+        },
+        {
+          "frame_index": 1,
+          "success": true
+        },
+        {
+          "frame_index": 2,
+          "success": true
+        },
+        {
+          "frame_index": 100,
+          "success": true
+        },
+        {
+          "frame_index": 500,
+          "success": true
+        },
+        {
+          "frame_index": 1000,
+          "success": true
+        },
+        {
+          "frame_index": 1023,
+          "success": true
+        },
+        {
+          "frame_index": 1024,
+          "success": true
+        },
+        {
+          "frame_index": 1100,
+          "success": true
+        },
+        {
+          "frame_index": 1200,
+          "success": true
+        },
+        {
+          "frame_index": 1300,
+          "success": true
+        }
+      ],
+      "backend_label": "CAP_FFMPEG"
+    },
+    {
+      "backend": "1400",
+      "opened": true,
+      "checks": [
+        {
+          "frame_index": 0,
+          "success": false
+        },
+        {
+          "frame_index": 1,
+          "success": false
+        },
+        {
+          "frame_index": 2,
+          "success": false
+        },
+        {
+          "frame_index": 100,
+          "success": false
+        },
+        {
+          "frame_index": 500,
+          "success": false
+        },
+        {
+          "frame_index": 1000,
+          "success": false
+        },
+        {
+          "frame_index": 1023,
+          "success": false
+        },
+        {
+          "frame_index": 1024,
+          "success": false
+        },
+        {
+          "frame_index": 1100,
+          "success": false
+        },
+        {
+          "frame_index": 1200,
+          "success": false
+        },
+        {
+          "frame_index": 1300,
+          "success": false
+        }
+      ],
+      "backend_label": "CAP_MSMF"
+    }
+  ]
+}
