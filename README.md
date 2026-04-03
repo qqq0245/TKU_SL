@@ -1,15 +1,20 @@
-﻿# 99_docs_analysis GitHub snapshot
+# TKU_SL
 
-This snapshot keeps the program source, configuration, manifests, and lightweight reports only.
+淡江大學 AI 系畢業專題，AI 手語輔助辨識。
 
-Excluded on purpose:
-- local videos and captures
-- raw training videos
-- model weights and checkpoints
-- processed `.npz` sequence artifacts
-- cache directories and generated smoke-run folders
+目前這個 repository 為 `99_docs_analysis` 的 code-only GitHub snapshot，保留：
+- 程式原始碼
+- 設定檔
+- metadata / manifest
+- 輕量報告與修補紀錄
 
-To rebuild a fresh snapshot from the full local workspace:
+刻意排除：
+- 本地錄製影片與資料集原始影片
+- 模型權重與 checkpoint
+- `npz` processed sequence artifacts
+- cache 與大型 smoke / runtime 產物
+
+若要從完整本地工作區重新匯出乾淨版，可執行：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\export_code_only_snapshot.ps1 -Clean
